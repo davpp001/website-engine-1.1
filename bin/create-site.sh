@@ -150,6 +150,23 @@ install_wordpress "$SUB" || {
   exit 1
 }
 
+
+# SSL-Nachbehandlung - sicherstellen, dass SSL korrekt installiert ist
+# Versuche das Zertifikat noch einmal zu installieren, falls es fehlgeschlagen ist
+echo "🔒 Führe SSL-Nachbehandlung durch..."
+if ! curl -s --head -o /dev/null https://$SUB.$DOMAIN; then
+  echo "🔍 SSL-Zertifikat scheint nicht korrekt installiert zu sein, versuche erneute Installation..."
+  
+  # Prüfe, ob das Zertifikat existiert
+  if sudo certbot certificates 2>/dev/null | grep -q "$SUB.$DOMAIN"; then
+    echo "🔄 Installiere vorhandenes Zertifikat in Apache..."
+    sudo certbot install --cert-name "$SUB.$DOMAIN" --non-interactive || true
+  else
+    echo "⚠️ Kein Zertifikat gefunden. Erstelle ein neues..."
+    sudo certbot --apache -d "$SUB.$DOMAIN" --non-interactive --agree-tos --email "$WP_EMAIL" || true
+  fi
+fi
+
 # Complete
 FINAL_URL="https://$SUB.$DOMAIN"
 echo

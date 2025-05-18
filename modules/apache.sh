@@ -73,8 +73,8 @@ function check_ssl_cert() {
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
     log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
-      log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt und Apache konfiguriert"
+    if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+      log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
     else
@@ -113,10 +113,12 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+        if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
-          log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt und Apache konfiguriert"
+          log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
+          
+          # Die Installation in Apache erfolgt später durch create_vhost_config und enable_vhost
         else
           log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
           # Verwende Standardzertifikat als Fallback (wird wahrscheinlich Fehler verursachen)
@@ -176,13 +178,40 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Direkt mit Apache-Integration erstellen
-      # Das löst beide Probleme: Zertifikat erstellen UND Apache richtig konfigurieren
-      if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
-        # Aktualisiere Zertifikatspfade nach erfolgreicher Erstellung
-        CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
-        KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
-        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt und Apache konfiguriert"
+      # Zweistufiger Prozess:
+      # 1. Erstelle Zertifikat ohne Apache (nur --cert-only)
+      # 2. Installiere es dann explizit mit install
+      if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
+        log "INFO" "SSL-Zertifikat für $FQDN erfolgreich erstellt, installiere jetzt in Apache..."
+        
+        # Erstelle zuerst einen einfachen VirtualHost mit ServerName für diese Domain
+        sudo tee "/etc/apache2/sites-available/$FQDN-base.conf" > /dev/null << EOF
+<VirtualHost *:80>
+  ServerName $FQDN
+  DocumentRoot ${WP_DIR}/${SUB}
+</VirtualHost>
+EOF
+        sudo a2ensite "$FQDN-base.conf"
+        sudo systemctl reload apache2
+        
+        # Jetzt installiere das Zertifikat in Apache
+        if sudo certbot install --cert-name "$FQDN" --non-interactive; then
+          log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich installiert"
+          
+          # Aktualisiere Pfade
+          CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
+          KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
+          
+          # Deaktiviere den temporären VHost, da Certbot einen mit SSL erstellt hat
+          sudo a2dissite "$FQDN-base.conf"
+          sudo systemctl reload apache2
+        else
+          log "WARNING" "Zertifikat erstellt, aber Installation fehlgeschlagen. Versuche manuellen Ansatz..."
+          
+          # Verwende die Pfade trotzdem
+          CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
+          KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
+        fi
       else
         log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird mit Standard-Zertifikat konfiguriert."
         CERT_PATH="$SSL_CERT_PATH"
@@ -192,7 +221,16 @@ function create_vhost_config() {
   fi
   
   # Erzeuge vHost-Konfiguration
-  sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+  # Prüfe, ob das Zertifikat existiert
+  local USE_SSL=1
+  if [[ ! -f "$CERT_PATH" || ! -f "$KEY_PATH" ]]; then
+    log "WARNING" "SSL-Zertifikatsdateien nicht gefunden. Erstelle HTTP-only Konfiguration."
+    USE_SSL=0
+  fi
+
+  if [[ $USE_SSL -eq 1 ]]; then
+    # Vollständige Konfiguration mit HTTP und HTTPS
+    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
 # Apache VirtualHost für ${FQDN}
 # Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -228,6 +266,24 @@ function create_vhost_config() {
   SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
   SSLHonorCipherOrder on
   SSLCompression off
+VHOST_EOF
+  else
+    # Nur HTTP-Konfiguration
+    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+# Apache VirtualHost für ${FQDN} (HTTP-only)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+VHOST_EOF
+  fi
   
   # Verzeichniskonfiguration
   <Directory ${DOCROOT}>
