@@ -262,6 +262,49 @@ VHOST_EOF
     return 1
   fi
   
+  # Prüfe, ob die Zertifikatsdateien existieren, falls SSL verwendet wird
+  if grep -q "SSLCertificateFile" "$VHOST_CONFIG"; then
+    # Nur prüfen, wenn es sich um eine SSL-Konfiguration handelt
+    if [[ ! -f "$CERT_PATH" ]]; then
+      log "ERROR" "SSL-Zertifikatsdatei nicht gefunden: $CERT_PATH"
+      log "INFO" "Erstelle HTTP-only Fallback-Konfiguration"
+      
+      # Erstelle HTTP-only VHost als Fallback
+      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
+# Apache VirtualHost für ${FQDN} (HTTP-only fallback)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+# HINWEIS: Dies ist eine Fallback-Konfiguration, da das SSL-Zertifikat fehlt
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+</VirtualHost>
+VHOST_HTTP_EOF
+    fi
+  fi
+  
   log "SUCCESS" "Apache vHost-Konfiguration für $FQDN erstellt"
   return 0
 }
@@ -284,7 +327,47 @@ function enable_vhost() {
   local syntax_check=$(sudo apache2ctl -t 2>&1)
   if [[ $? -ne 0 ]]; then
     log "ERROR" "Apache-Syntax ungültig: $syntax_check"
-    return 1
+    
+    # Versuche, die häufigsten Fehler zu beheben
+    if [[ "$syntax_check" == *"SSLCertificateFile"* || "$syntax_check" == *"SSLCertificateKeyFile"* ]]; then
+      log "WARNING" "Fehler bei SSL-Konfiguration erkannt. Erstelle HTTP-only Fallback"
+      
+      # Erstelle HTTP-only Fallback
+      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
+# Apache VirtualHost für ${SUB}.${DOMAIN} (HTTP-only recovery)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+# HINWEIS: Dies ist eine Fallback-Konfiguration nach SSL-Fehler
+
+<VirtualHost *:80>
+  ServerName ${SUB}.${DOMAIN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${WP_DIR}/${SUB}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  <Directory ${WP_DIR}/${SUB}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+VHOST_HTTP_EOF
+
+      # Prüfe erneut die Syntax
+      syntax_check=$(sudo apache2ctl -t 2>&1)
+      if [[ $? -ne 0 ]]; then
+        log "ERROR" "Apache-Syntax immer noch ungültig: $syntax_check"
+        return 1
+      else
+        log "INFO" "Fallback-Konfiguration erstellt und Syntax validiert"
+      fi
+    else
+      # Andere Fehler können wir nicht automatisch beheben
+      return 1
+    fi
   fi
   
   # Aktiviere vHost mit a2ensite
@@ -331,7 +414,54 @@ function setup_vhost() {
     return 1
   }
   
-  # 4. Aktiviere vHost
+  # 4. Aktiviere vHost mit Fehlerbehandlung
+  # Zuerst Syntax prüfen
+  local syntax_error=$(sudo apachectl -t 2>&1)
+  if [[ $? -ne 0 ]]; then
+    log "ERROR" "Apache-Konfigurationsfehler: $syntax_error"
+    log "INFO" "Versuche, den Fehler automatisch zu beheben..."
+    
+    # Prüfe, ob die Zertifikatsdateien existieren
+    if ! [[ -f "$CERT_PATH" && -f "$KEY_PATH" ]]; then
+      log "ERROR" "SSL-Zertifikatsdateien nicht gefunden: $CERT_PATH oder $KEY_PATH"
+      
+      # Wenn kein SSL-Zertifikat gefunden wurde, erstelle eine HTTP-only VHost-Konfiguration als Fallback
+      log "INFO" "Erstelle temporäre HTTP-only VHost-Konfiguration als Fallback"
+      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
+# Apache VirtualHost für ${FQDN} (HTTP-only fallback)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+</VirtualHost>
+VHOST_HTTP_EOF
+    fi
+  fi
+  
+  # Jetzt versuchen, den vHost zu aktivieren
   enable_vhost "$SUB" || {
     log "ERROR" "Konnte vHost nicht aktivieren"
     return 1
