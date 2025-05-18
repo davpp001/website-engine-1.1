@@ -6,8 +6,20 @@ set -euo pipefail
 # ====================================================================
 
 # Import modules
+# Versuche zuerst den Installationspfad zu finden
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="$(dirname "$SCRIPT_DIR")/modules"
+
+# Versuche verschiedene mögliche Modulpfade
+if [[ -d "/opt/website-engine-1.1/modules" ]]; then
+    MODULE_DIR="/opt/website-engine-1.1/modules"
+elif [[ -d "$(dirname "$SCRIPT_DIR")/modules" ]]; then
+    MODULE_DIR="$(dirname "$SCRIPT_DIR")/modules"
+elif [[ -d "/usr/local/modules" ]]; then
+    MODULE_DIR="/usr/local/modules"
+else
+    echo "❌ Fehler: Kann das Modulverzeichnis nicht finden"
+    exit 1
+fi
 
 source "${MODULE_DIR}/config.sh"
 source "${MODULE_DIR}/cloudflare.sh"
