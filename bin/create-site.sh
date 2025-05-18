@@ -151,23 +151,43 @@ install_wordpress "$SUB" || {
 }
 
 
-# SSL-Nachbehandlung - direkte Methode mit dem dedizierten SSL-Setup-Skript
-echo "🔒 Richte SSL-Zertifikat ein..."
+# EXTREM VEREINFACHTE SSL-METHODE - Direkter Ansatz
+echo "🔒 Richte SSL-Zertifikat ein (vereinfachte Methode)..."
 
-# Benutze das dedizierte Setup-Skript (viel zuverlässiger)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -x "$SCRIPT_DIR/setup-ssl.sh" ]; then
-  # Führe das dedizierte Setup-Skript aus
-  "$SCRIPT_DIR/setup-ssl.sh" "${SUB}.${DOMAIN}" || {
-    echo "⚠️ SSL-Einrichtung fehlgeschlagen, versuche Standard-Certbot..."
-    # Fallback-Methode: Direkter Apache-Modus
-    sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive --agree-tos --email "$WP_EMAIL" || true
-  }
-else
-  # Fallback, wenn das Skript nicht gefunden wird
-  echo "⚠️ SSL-Setup-Skript nicht gefunden. Verwende Standard-Certbot..."
-  sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive --agree-tos --email "$WP_EMAIL" || true
-fi
+# Apache stoppen, damit Port 80 frei ist für Certbot
+echo "🛑 Stoppe Apache kurzzeitig für die SSL-Erstellung..."
+sudo systemctl stop apache2
+
+# Minimale VirtualHost-Konfiguration (wichtig für Certbot)
+sudo tee "/etc/apache2/sites-available/${SUB}.${DOMAIN}.conf" > /dev/null << EOF
+<VirtualHost *:80>
+  ServerName ${SUB}.${DOMAIN}
+  DocumentRoot ${WP_DIR}/${SUB}
+</VirtualHost>
+EOF
+
+# Bereite Webroot vor
+sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
+sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
+
+# Starte Apache wieder
+echo "🟢 Starte Apache wieder..."
+sudo systemctl start apache2
+sudo a2ensite "${SUB}.${DOMAIN}.conf"
+sudo systemctl reload apache2
+
+# Warte kurz, damit Apache hochfahren kann
+sleep 3
+
+# Jetzt Certbot ohne Hooks ausführen
+echo "🔑 Erstelle SSL-Zertifikat via Certbot..."
+sudo certbot --apache --non-interactive --agree-tos --email "$WP_EMAIL" -d "${SUB}.${DOMAIN}" || {
+  echo "⚠️ Certbot fehlgeschlagen. Führe manuelles SSL-Setup durch..."
+  
+  # Anzeigen, dass SSL nicht erfolgreich eingerichtet wurde  
+  echo "❌ SSL konnte nicht automatisch eingerichtet werden."
+  echo "📋 Manuell ausführen: sudo certbot --apache -d ${SUB}.${DOMAIN}"
+}
 
 # Complete
 FINAL_URL="https://$SUB.$DOMAIN"
