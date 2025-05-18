@@ -151,52 +151,22 @@ install_wordpress "$SUB" || {
 }
 
 
-# SSL-Nachbehandlung - sicherstellen, dass SSL korrekt installiert ist
-# Versuche das Zertifikat noch einmal zu installieren, falls es fehlgeschlagen ist
-echo "🔒 Führe SSL-Nachbehandlung durch..."
+# SSL-Nachbehandlung - direkte Methode mit dem dedizierten SSL-Setup-Skript
+echo "🔒 Richte SSL-Zertifikat ein..."
 
-# Prüfe, ob das Zertifikat existiert
-if sudo certbot certificates 2>/dev/null | grep -q "$SUB.$DOMAIN"; then
-  echo "🔄 Zertifikat gefunden, versuche Installation in Apache..."
-  
-  # Definiere einen eindeutigen VirtualHost für diese Domain
-  TEMP_VHOST="/etc/apache2/sites-available/${SUB}.${DOMAIN}-ssl-temp.conf"
-  
-  # Erstelle einen minimalen VirtualHost, der genau ServerName enthält
-  sudo tee "$TEMP_VHOST" > /dev/null << EOF
-<VirtualHost *:443>
-  ServerName ${SUB}.${DOMAIN}
-  DocumentRoot ${WP_DIR}/${SUB}
-  
-  SSLEngine on
-</VirtualHost>
-EOF
-  
-  sudo a2ensite "$(basename "$TEMP_VHOST")"
-  sudo systemctl reload apache2
-  
-  # Jetzt versuche, das Zertifikat zu installieren
-  sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive || true
-  
-  # Bereinige den temporären VHost
-  sudo a2dissite "$(basename "$TEMP_VHOST")"
-  sudo rm -f "$TEMP_VHOST"
-  sudo systemctl reload apache2
+# Benutze das dedizierte Setup-Skript (viel zuverlässiger)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -x "$SCRIPT_DIR/setup-ssl.sh" ]; then
+  # Führe das dedizierte Setup-Skript aus
+  "$SCRIPT_DIR/setup-ssl.sh" "${SUB}.${DOMAIN}" || {
+    echo "⚠️ SSL-Einrichtung fehlgeschlagen, versuche Standard-Certbot..."
+    # Fallback-Methode: Direkter Apache-Modus
+    sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive --agree-tos --email "$WP_EMAIL" || true
+  }
 else
-  echo "⚠️ Kein Zertifikat gefunden. Erstelle ein neues mit Webroot..."
-  
-  # Webroot-Verzeichnis vorbereiten
-  sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
-  sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
-  
-  # Erstellen eines Zertifikats mit Webroot
-  sudo certbot certonly --webroot --webroot-path="${WP_DIR}/${SUB}" \
-    --non-interactive --agree-tos --email "$WP_EMAIL" -d "${SUB}.${DOMAIN}" || true
-    
-  # Installieren des Zertifikats in Apache
-  if sudo certbot certificates 2>/dev/null | grep -q "$SUB.$DOMAIN"; then
-    sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive || true
-  fi
+  # Fallback, wenn das Skript nicht gefunden wird
+  echo "⚠️ SSL-Setup-Skript nicht gefunden. Verwende Standard-Certbot..."
+  sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive --agree-tos --email "$WP_EMAIL" || true
 fi
 
 # Complete
