@@ -151,42 +151,88 @@ install_wordpress "$SUB" || {
 }
 
 
-# EXTREM VEREINFACHTE SSL-METHODE - Direkter Ansatz
-echo "🔒 Richte SSL-Zertifikat ein (vereinfachte Methode)..."
+# EXAKT DEN ERFOLGREICH GETESTETEN ANSATZ VON direct-ssl.sh VERWENDEN
+echo "🔒 Richte SSL-Zertifikat ein (bewährte Methode)..."
 
-# Apache stoppen, damit Port 80 frei ist für Certbot
-echo "🛑 Stoppe Apache kurzzeitig für die SSL-Erstellung..."
-sudo systemctl stop apache2
+# Zusätzliche DNS-Überprüfung, um sicherzustellen, dass DNS propagiert ist
+echo "🌐 Prüfe DNS-Propagation für ${SUB}.${DOMAIN}..."
+DNS_CHECK_PASSED=0
+MAX_DNS_CHECKS=5
+DNS_WAIT_SECONDS=15
 
-# Minimale VirtualHost-Konfiguration (wichtig für Certbot)
-sudo tee "/etc/apache2/sites-available/${SUB}.${DOMAIN}.conf" > /dev/null << EOF
+for ((i=1; i<=MAX_DNS_CHECKS; i++)); do
+  echo -n "DNS-Prüfung $i von $MAX_DNS_CHECKS: "
+  
+  if host "${SUB}.${DOMAIN}" &>/dev/null || dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
+    echo "✅ Erfolgreich!"
+    DNS_CHECK_PASSED=1
+    break
+  else
+    echo "⏳ Noch nicht verfügbar, warte $DNS_WAIT_SECONDS Sekunden..."
+    sleep $DNS_WAIT_SECONDS
+  fi
+done
+
+if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
+  echo "⚠️ DNS-Propagation konnte nicht verifiziert werden. Dies könnte zu Problemen bei der SSL-Zertifikatserstellung führen."
+  echo "   Fahre dennoch fort..."
+else
+  echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
+fi
+
+# 1. Erstelle einfache Apache-Konfiguration
+echo "📝 Erstelle Apache-Konfiguration"
+
+# Entferne alte Konfigurationen
+sudo a2dissite "*${SUB}*" &>/dev/null || true
+sudo rm -f "/etc/apache2/sites-available/*${SUB}*" &>/dev/null || true
+
+# Einfache neue Konfiguration
+sudo tee "/etc/apache2/sites-available/${SUB}.conf" > /dev/null << EOF
 <VirtualHost *:80>
   ServerName ${SUB}.${DOMAIN}
   DocumentRoot ${WP_DIR}/${SUB}
+  
+  <Directory ${WP_DIR}/${SUB}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+  
+  # Unterstützung für ACME-Challenge (Let's Encrypt)
+  <Directory "${WP_DIR}/${SUB}/.well-known/acme-challenge">
+    Options None
+    AllowOverride None
+    Require all granted
+  </Directory>
 </VirtualHost>
 EOF
 
-# Bereite Webroot vor
-sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
-sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
-
-# Starte Apache wieder
-echo "🟢 Starte Apache wieder..."
-sudo systemctl start apache2
-sudo a2ensite "${SUB}.${DOMAIN}.conf"
+# 2. Aktiviere die Site
+echo "🔄 Aktiviere VirtualHost"
+sudo a2ensite "${SUB}.conf"
 sudo systemctl reload apache2
 
-# Warte kurz, damit Apache hochfahren kann
-sleep 3
+# Warte kurz, damit Apache sich neu laden kann
+sleep 2
 
-# Jetzt Certbot ohne Hooks ausführen
-echo "🔑 Erstelle SSL-Zertifikat via Certbot..."
-sudo certbot --apache --non-interactive --agree-tos --email "$WP_EMAIL" -d "${SUB}.${DOMAIN}" || {
-  echo "⚠️ Certbot fehlgeschlagen. Führe manuelles SSL-Setup durch..."
+# 3. SSL direkt mit Apache-Plugin erstellen - EXAKT wie im funktionierenden Skript
+echo "🔐 Erstelle und installiere SSL-Zertifikat"
+sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}" || {
+  echo "⚠️ Certbot fehlgeschlagen. Versuche alternative Methode..."
   
-  # Anzeigen, dass SSL nicht erfolgreich eingerichtet wurde  
-  echo "❌ SSL konnte nicht automatisch eingerichtet werden."
-  echo "📋 Manuell ausführen: sudo certbot --apache -d ${SUB}.${DOMAIN}"
+  # Versuche die direkte Methode mit unserem bewährten Skript
+  echo "🔄 Starte alternatives SSL-Setup mit direct-ssl.sh..."
+  sudo /opt/website-engine-1.1/bin/direct-ssl.sh "${SUB}.${DOMAIN}" || {
+    echo "⚠️ Beide SSL-Installationsmethoden fehlgeschlagen."
+    echo "   Mögliche Ursachen:"
+    echo "   - DNS-Propagation ist noch nicht abgeschlossen"
+    echo "   - Port 80 ist durch anderen Dienst blockiert"
+    echo "   - Certbot hat temporäre Probleme"
+    echo
+    echo "   Bitte später manuell ausführen:"
+    echo "   sudo /opt/website-engine-1.1/bin/direct-ssl.sh ${SUB}.${DOMAIN}"
+  }
 }
 
 # Complete
