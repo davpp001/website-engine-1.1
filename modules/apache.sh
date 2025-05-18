@@ -266,24 +266,6 @@ EOF
   SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
   SSLHonorCipherOrder on
   SSLCompression off
-VHOST_EOF
-  else
-    # Nur HTTP-Konfiguration
-    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
-# Apache VirtualHost für ${FQDN} (HTTP-only)
-# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
-
-<VirtualHost *:80>
-  ServerName ${FQDN}
-  ServerAdmin ${WP_EMAIL}
-  ServerSignature Off
-  
-  DocumentRoot ${DOCROOT}
-  
-  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
-  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
-VHOST_EOF
-  fi
   
   # Verzeichniskonfiguration
   <Directory ${DOCROOT}>
@@ -311,7 +293,49 @@ VHOST_EOF
   </Directory>
 </VirtualHost>
 VHOST_EOF
+  else
+    # Nur HTTP-Konfiguration
+    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+# Apache VirtualHost für ${FQDN} (HTTP-only)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
   
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  # Verzeichniskonfiguration
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+  
+  # Sicherheitseinstellungen
+  <Directory ${DOCROOT}/wp-content/uploads>
+    # PHP-Ausführung in Uploads-Verzeichnis verbieten
+    <FilesMatch "\.(?i:php|phar|phtml|php\d+)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>
+</VirtualHost>
+VHOST_EOF
+  fi
   # Prüfe, ob die Konfiguration erfolgreich erstellt wurde
   if [[ ! -f "$VHOST_CONFIG" ]]; then
     log "ERROR" "Konnte vHost-Konfiguration nicht erstellen: $VHOST_CONFIG"
