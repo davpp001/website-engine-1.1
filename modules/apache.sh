@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ====================================================================
-# APACHE VHOST-MANAGEMENT-MODUL
+# APACHE VHOST-MANAGEMENT-MODUL (OPTIMIERT)
 # ====================================================================
 #
 # Dieses Modul verwaltet Apache Virtual Hosts und SSL-Zertifikate.
@@ -10,18 +10,129 @@ set -euo pipefail
 # da dies sich als die zuverlässigste Methode erwiesen hat.
 #
 # FUNKTIONEN:
-# - check_ssl_cert - Prüft, ob ein SSL-Zertifikat existiert
-# - get_ssl_cert_paths - Ermittelt die Pfade für SSL-Zertifikate
-# - create_vhost_config - Erstellt eine vHost-Konfiguration
-# - enable_vhost - Aktiviert einen vHost
-# - setup_vhost - Richtet einen kompletten vHost ein
-# - remove_vhost - Entfernt einen vHost
+# - create_ssl_cert       - Erstellt ein SSL-Zertifikat (--apache Methode)
+# - create_http_vhost     - Erstellt eine einfache HTTP-Konfiguration
+# - check_ssl_cert        - Prüft, ob ein SSL-Zertifikat existiert
+# - get_ssl_cert_paths    - Ermittelt die Pfade für SSL-Zertifikate
+# - create_vhost_config   - Erstellt eine vHost-Konfiguration
+# - enable_vhost          - Aktiviert einen vHost
+# - setup_vhost           - Richtet einen kompletten vHost ein
+# - remove_vhost          - Entfernt einen vHost
 #
 # ====================================================================
 
 # Import config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
+
+# SSL-Zertifikat mit certbot --apache erstellen
+# Usage: create_ssl_cert <domain> [document-root]
+function create_ssl_cert() {
+  local DOMAIN="$1"
+  local DOCROOT="${2:-$WP_DIR/${DOMAIN%%.*}}"
+  
+  log "INFO" "Erstelle SSL-Zertifikat für $DOMAIN mit certbot --apache"
+  
+  # 1. Stelle sicher, dass Verzeichnis existiert
+  sudo mkdir -p "$DOCROOT/.well-known/acme-challenge"
+  sudo chown -R www-data:www-data "$DOCROOT"
+  
+  # 2. Erstelle einfache VirtualHost-Konfiguration
+  local SUB="${DOMAIN%%.*}"
+  local VHOST_CONFIG="/etc/apache2/sites-available/${SUB}.conf"
+  
+  # Entferne alte Konfigurationen
+  sudo a2dissite "*$SUB*" &>/dev/null || true
+  sudo rm -f "/etc/apache2/sites-available/*$SUB*" &>/dev/null || true
+  
+  # Erstelle neue Konfiguration
+  sudo tee "$VHOST_CONFIG" > /dev/null << EOF
+<VirtualHost *:80>
+  ServerName ${DOMAIN}
+  DocumentRoot ${DOCROOT}
+  
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+  
+  <Directory "${DOCROOT}/.well-known/acme-challenge">
+    Options None
+    AllowOverride None
+    Require all granted
+  </Directory>
+</VirtualHost>
+EOF
+  
+  # 3. Aktiviere die Konfiguration
+  sudo a2ensite "${SUB}.conf"
+  sudo systemctl reload apache2
+  sleep 5
+  
+  # 4. Erstelle Zertifikat mit certbot --apache
+  if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN"; then
+    log "SUCCESS" "SSL-Zertifikat für $DOMAIN erfolgreich erstellt"
+    return 0
+  else
+    log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN erstellen"
+    return 1
+  fi
+}
+
+# Erstelle eine einfache HTTP-only VirtualHost-Konfiguration
+# Usage: create_http_vhost <subdomain> [fallback-message]
+function create_http_vhost() {
+  local SUB="$1"
+  local FQDN="${SUB}.${DOMAIN}"
+  local DOCROOT="${WP_DIR}/${SUB}"
+  local VHOST_CONFIG="${APACHE_SITES_DIR}/${SUB}.conf"
+  local MESSAGE="${2:-"HTTP-only"}"
+  
+  log "INFO" "Erstelle HTTP-only VirtualHost für $FQDN"
+  
+  sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
+# Apache VirtualHost für ${FQDN} ($MESSAGE)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+  
+  # Sicherheitseinstellungen
+  <Directory ${DOCROOT}/wp-content/uploads>
+    # PHP-Ausführung in Uploads-Verzeichnis verbieten
+    <FilesMatch "\.(?i:php|phar|phtml|php\d+)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>
+</VirtualHost>
+VHOST_HTTP_EOF
+
+  return 0
+}
 
 # SSL-Zertifikat verwalten
 # Usage: check_ssl_cert [domain]
@@ -85,36 +196,9 @@ function check_ssl_cert() {
   # Wenn wir eine Subdomain prüfen und kein Wildcard-Zertifikat haben, erstelle ein eigenes
   if [[ $IS_SUBDOMAIN -eq 1 && $HAS_WILDCARD -eq 0 ]]; then
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
-    log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    # Stelle sicher, dass Verzeichnis existiert
-    local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
-    sudo mkdir -p "$DOMAIN_DOCROOT"
-    sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
-    
-    # Erstelle einfache VirtualHost-Konfiguration für das SSL-Zertifikat
-    sudo tee "/etc/apache2/sites-available/${DOMAIN_TO_CHECK}.conf" > /dev/null << EOF
-<VirtualHost *:80>
-  ServerName ${DOMAIN_TO_CHECK}
-  DocumentRoot ${DOMAIN_DOCROOT}
-  
-  <Directory ${DOMAIN_DOCROOT}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-</VirtualHost>
-EOF
-    
-    # Aktiviere die Konfiguration
-    sudo a2ensite "${DOMAIN_TO_CHECK}.conf"
-    sudo systemctl reload apache2
-    
-    # Kurze Wartezeit für Apache reload
-    sleep 5
-    
-    # Verwende das Apache-Plugin für Certbot statt Webroot (zuverlässiger)
-    if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+    # Verwende die neue create_ssl_cert Funktion
+    if create_ssl_cert "$DOMAIN_TO_CHECK"; then
       log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
@@ -154,54 +238,16 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        # Erstelle Verzeichnis, falls es noch nicht existiert
-        local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
-        sudo mkdir -p "$DOMAIN_DOCROOT"
-        sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
-        
-        # Erstelle einfache VirtualHost-Konfiguration für das SSL-Zertifikat
-        local SUB="${DOMAIN_TO_CHECK%%.*}"
-        log "INFO" "Erstelle temporäre Apache-Konfiguration für SSL-Zertifikat von $DOMAIN_TO_CHECK"
-        
-        sudo tee "/etc/apache2/sites-available/${SUB}-temp.conf" > /dev/null << EOF
-<VirtualHost *:80>
-  ServerName ${DOMAIN_TO_CHECK}
-  DocumentRoot ${DOMAIN_DOCROOT}
-  
-  <Directory ${DOMAIN_DOCROOT}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-</VirtualHost>
-EOF
-        
-        # Aktiviere die Site für SSL-Validierung
-        sudo a2ensite "${SUB}-temp.conf"
-        sudo systemctl reload apache2
-        sleep 5
-        
-        # Verwende jetzt das Apache-Plugin für SSL
-        if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+        # Verwende die neue create_ssl_cert Funktion
+        if create_ssl_cert "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
           log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
-          
-          # Certbot hat bereits eine SSL-Version erstellt, also müssen wir hier nichts mehr tun
-          # Wir löschen später die temporäre Konfiguration, wenn wir die richtige VHost-Konfiguration erstellen
-          sudo a2dissite "${SUB}-temp.conf"
-          sudo rm -f "/etc/apache2/sites-available/${SUB}-temp.conf"
-          sudo systemctl reload apache2
         else
           log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
           # Verwende Standardzertifikat als Fallback (wird wahrscheinlich Fehler verursachen)
           CERT_PATH="$SSL_CERT_PATH"
           KEY_PATH="$SSL_KEY_PATH"
-          
-          # Entferne die temporäre Konfiguration
-          sudo a2dissite "${SUB}-temp.conf"
-          sudo rm -f "/etc/apache2/sites-available/${SUB}-temp.conf"
-          sudo systemctl reload apache2
         fi
       fi
     else
@@ -256,41 +302,8 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Apache-basierte Zertifikatserstellung (direkte Methode)
-      # Diese Methode funktioniert zuverlässiger als webroot
-      log "INFO" "Erstelle SSL-Zertifikat mit Apache-Plugin für $FQDN..."
-      
-      # 1. Stelle sicher, dass der VirtualHost korrekt konfiguriert ist
-      # Erstelle einen einfachen VirtualHost mit ServerName für diese Domain
-      sudo tee "/etc/apache2/sites-available/$FQDN.conf" > /dev/null << EOF
-<VirtualHost *:80>
-  ServerName $FQDN
-  DocumentRoot ${WP_DIR}/${SUB}
-  
-  <Directory ${WP_DIR}/${SUB}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-  
-  # Unterstützung für ACME-Challenge
-  <Directory "${WP_DIR}/${SUB}/.well-known/acme-challenge">
-    Options None
-    AllowOverride None
-    Require all granted
-  </Directory>
-</VirtualHost>
-EOF
-
-      # 2. Aktiviere den VirtualHost
-      sudo a2ensite "$FQDN.conf"
-      sudo systemctl reload apache2
-      
-      # Kurze Pause für Apache reload
-      sleep 5
-      
-      # 3. Erstelle und installiere Zertifikat mit dem Apache-Plugin
-      if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
+      # Verwende die neue create_ssl_cert Funktion für SSL-Erstellung
+      if create_ssl_cert "$FQDN" "${WP_DIR}/${SUB}"; then
         log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt und installiert"
         
         # Aktualisiere Pfade
@@ -426,46 +439,14 @@ VHOST_EOF
     return 1
   fi
   
-  # Prüfe, ob die Zertifikatsdateien existieren, falls SSL verwendet wird
-  if grep -q "SSLCertificateFile" "$VHOST_CONFIG"; then
+    if grep -q "SSLCertificateFile" "$VHOST_CONFIG"; then
     # Nur prüfen, wenn es sich um eine SSL-Konfiguration handelt
     if [[ ! -f "$CERT_PATH" ]]; then
       log "ERROR" "SSL-Zertifikatsdatei nicht gefunden: $CERT_PATH"
       log "INFO" "Erstelle HTTP-only Fallback-Konfiguration"
       
-      # Erstelle HTTP-only VHost als Fallback
-      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
-# Apache VirtualHost für ${FQDN} (HTTP-only fallback)
-# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
-# HINWEIS: Dies ist eine Fallback-Konfiguration, da das SSL-Zertifikat fehlt
-
-<VirtualHost *:80>
-  ServerName ${FQDN}
-  ServerAdmin ${WP_EMAIL}
-  ServerSignature Off
-  
-  DocumentRoot ${DOCROOT}
-  
-  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
-  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
-  
-  <Directory ${DOCROOT}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-    
-    # WordPress .htaccess nicht benötigen
-    <IfModule mod_rewrite.c>
-      RewriteEngine On
-      RewriteBase /
-      RewriteRule ^index\.php$ - [L]
-      RewriteCond %{REQUEST_FILENAME} !-f
-      RewriteCond %{REQUEST_FILENAME} !-d
-      RewriteRule . /index.php [L]
-    </IfModule>
-  </Directory>
-</VirtualHost>
-VHOST_HTTP_EOF
+      # Verwende die neue create_http_vhost Funktion
+      create_http_vhost "$SUB" "HTTP-only fallback"
     fi
   fi
   
@@ -496,29 +477,8 @@ function enable_vhost() {
     if [[ "$syntax_check" == *"SSLCertificateFile"* || "$syntax_check" == *"SSLCertificateKeyFile"* ]]; then
       log "WARNING" "Fehler bei SSL-Konfiguration erkannt. Erstelle HTTP-only Fallback"
       
-      # Erstelle HTTP-only Fallback
-      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
-# Apache VirtualHost für ${SUB}.${DOMAIN} (HTTP-only recovery)
-# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
-# HINWEIS: Dies ist eine Fallback-Konfiguration nach SSL-Fehler
-
-<VirtualHost *:80>
-  ServerName ${SUB}.${DOMAIN}
-  ServerAdmin ${WP_EMAIL}
-  ServerSignature Off
-  
-  DocumentRoot ${WP_DIR}/${SUB}
-  
-  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
-  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
-  
-  <Directory ${WP_DIR}/${SUB}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-</VirtualHost>
-VHOST_HTTP_EOF
+      # Verwende die neue create_http_vhost Funktion
+      create_http_vhost "$SUB" "HTTP-only recovery"
 
       # Prüfe erneut die Syntax
       syntax_check=$(sudo apache2ctl -t 2>&1)
@@ -613,37 +573,7 @@ function setup_vhost() {
       
       # Wenn kein SSL-Zertifikat gefunden wurde, erstelle eine HTTP-only VHost-Konfiguration als Fallback
       log "INFO" "Erstelle temporäre HTTP-only VHost-Konfiguration als Fallback"
-      sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_HTTP_EOF
-# Apache VirtualHost für ${FQDN} (HTTP-only fallback)
-# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
-
-<VirtualHost *:80>
-  ServerName ${FQDN}
-  ServerAdmin ${WP_EMAIL}
-  ServerSignature Off
-  
-  DocumentRoot ${DOCROOT}
-  
-  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
-  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
-  
-  <Directory ${DOCROOT}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-    
-    # WordPress .htaccess nicht benötigen
-    <IfModule mod_rewrite.c>
-      RewriteEngine On
-      RewriteBase /
-      RewriteRule ^index\.php$ - [L]
-      RewriteCond %{REQUEST_FILENAME} !-f
-      RewriteCond %{REQUEST_FILENAME} !-d
-      RewriteRule . /index.php [L]
-    </IfModule>
-  </Directory>
-</VirtualHost>
-VHOST_HTTP_EOF
+      create_http_vhost "$SUB" "HTTP-only fallback"
     fi
   fi
   
