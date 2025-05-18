@@ -73,7 +73,12 @@ function check_ssl_cert() {
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
     log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+    # Erstelle Webroot-Verzeichnis 
+    local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
+    sudo mkdir -p "$DOMAIN_DOCROOT/.well-known/acme-challenge"
+    sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
+    
+    if sudo certbot certonly --webroot --webroot-path="$DOMAIN_DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
       log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
@@ -113,7 +118,12 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+        # Erstelle Webroot-Verzeichnis, falls es noch nicht existiert
+        local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
+        sudo mkdir -p "$DOMAIN_DOCROOT/.well-known/acme-challenge"
+        sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
+        
+        if sudo certbot certonly --webroot --webroot-path="$DOMAIN_DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
           log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
@@ -178,10 +188,13 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Zweistufiger Prozess:
-      # 1. Erstelle Zertifikat ohne Apache (nur --cert-only)
-      # 2. Installiere es dann explizit mit install
-      if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
+      # Webroot-basierte Zertifikatserstellung (Apache bleibt aktiv)
+      # 1. Erstelle die Webroot-Verzeichnisstruktur
+      sudo mkdir -p "$DOCROOT/.well-known/acme-challenge"
+      sudo chown -R www-data:www-data "$DOCROOT"
+      
+      # 2. Erstelle Zertifikat mit webroot
+      if sudo certbot certonly --webroot --webroot-path="$DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
         log "INFO" "SSL-Zertifikat für $FQDN erfolgreich erstellt, installiere jetzt in Apache..."
         
         # Erstelle zuerst einen einfachen VirtualHost mit ServerName für diese Domain

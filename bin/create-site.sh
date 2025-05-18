@@ -154,16 +154,48 @@ install_wordpress "$SUB" || {
 # SSL-Nachbehandlung - sicherstellen, dass SSL korrekt installiert ist
 # Versuche das Zertifikat noch einmal zu installieren, falls es fehlgeschlagen ist
 echo "🔒 Führe SSL-Nachbehandlung durch..."
-if ! curl -s --head -o /dev/null https://$SUB.$DOMAIN; then
-  echo "🔍 SSL-Zertifikat scheint nicht korrekt installiert zu sein, versuche erneute Installation..."
+
+# Prüfe, ob das Zertifikat existiert
+if sudo certbot certificates 2>/dev/null | grep -q "$SUB.$DOMAIN"; then
+  echo "🔄 Zertifikat gefunden, versuche Installation in Apache..."
   
-  # Prüfe, ob das Zertifikat existiert
+  # Definiere einen eindeutigen VirtualHost für diese Domain
+  TEMP_VHOST="/etc/apache2/sites-available/${SUB}.${DOMAIN}-ssl-temp.conf"
+  
+  # Erstelle einen minimalen VirtualHost, der genau ServerName enthält
+  sudo tee "$TEMP_VHOST" > /dev/null << EOF
+<VirtualHost *:443>
+  ServerName ${SUB}.${DOMAIN}
+  DocumentRoot ${WP_DIR}/${SUB}
+  
+  SSLEngine on
+</VirtualHost>
+EOF
+  
+  sudo a2ensite "$(basename "$TEMP_VHOST")"
+  sudo systemctl reload apache2
+  
+  # Jetzt versuche, das Zertifikat zu installieren
+  sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive || true
+  
+  # Bereinige den temporären VHost
+  sudo a2dissite "$(basename "$TEMP_VHOST")"
+  sudo rm -f "$TEMP_VHOST"
+  sudo systemctl reload apache2
+else
+  echo "⚠️ Kein Zertifikat gefunden. Erstelle ein neues mit Webroot..."
+  
+  # Webroot-Verzeichnis vorbereiten
+  sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
+  sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
+  
+  # Erstellen eines Zertifikats mit Webroot
+  sudo certbot certonly --webroot --webroot-path="${WP_DIR}/${SUB}" \
+    --non-interactive --agree-tos --email "$WP_EMAIL" -d "${SUB}.${DOMAIN}" || true
+    
+  # Installieren des Zertifikats in Apache
   if sudo certbot certificates 2>/dev/null | grep -q "$SUB.$DOMAIN"; then
-    echo "🔄 Installiere vorhandenes Zertifikat in Apache..."
-    sudo certbot install --cert-name "$SUB.$DOMAIN" --non-interactive || true
-  else
-    echo "⚠️ Kein Zertifikat gefunden. Erstelle ein neues..."
-    sudo certbot --apache -d "$SUB.$DOMAIN" --non-interactive --agree-tos --email "$WP_EMAIL" || true
+    sudo certbot --apache -d "${SUB}.${DOMAIN}" --non-interactive || true
   fi
 fi
 
