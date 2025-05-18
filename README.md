@@ -48,7 +48,7 @@ create-site kundename
 
 Dies:
 - Erstellt einen A-Record bei Cloudflare (z.B. kundename.s-neue.website)
-- Richtet einen Apache vHost mit SSL ein
+- Richtet einen Apache vHost mit SSL ein (mit Let's Encrypt Zertifikat)
 - Installiert und konfiguriert WordPress mit eindeutigen Datenbank-Anmeldedaten
 - Speichert die Datenbank-Informationen für Backups
 
@@ -75,6 +75,19 @@ Dies:
 delete-site kundename --keep-dns
 ```
 
+### SSL-Zertifikat separat einrichten
+
+Falls notwendig, kann ein SSL-Zertifikat auch separat mit dem direct-ssl.sh Skript eingerichtet werden:
+
+```bash
+direct-ssl subdomain.domain.tld
+```
+
+Dies wird normalerweise automatisch durch create-site erledigt. Es kann aber nützlich sein, wenn:
+- Zertifikat nicht beim ersten Mal erstellt wurde
+- Ein Zertifikat erneuert werden muss
+- Sie ein Zertifikat für eine bestehende Domain einrichten wollen
+
 ## Struktur
 
 ```
@@ -82,6 +95,7 @@ delete-site kundename --keep-dns
 ├── bin/
 │   ├── create-site.sh      # Erstellt eine neue Subdomain mit WordPress
 │   ├── delete-site.sh      # Löscht eine bestehende Subdomain mit WordPress
+│   ├── direct-ssl.sh       # Richtet SSL direkt für eine Domain ein
 │   └── setup-server.sh     # Servereinrichtung mit Voraussetzungen
 ├── modules/
 │   ├── config.sh           # Zentrale Konfigurationsdatei
@@ -133,5 +147,5 @@ Das erweiterte Backup-System bietet:
 - Jede WordPress-Installation erhält einen eigenen Datenbankbenutzer
 - Datenbank-Passwörter werden zufällig generiert
 - Anmeldedaten werden in sicheren Dateien mit eingeschränkten Berechtigungen gespeichert
-- SSL-Verschlüsselung für alle Websites
+- Automatische SSL-Verschlüsselung für alle Websites mit Let's Encrypt (certbot --apache)
 - Restic-Backups sind verschlüsselt

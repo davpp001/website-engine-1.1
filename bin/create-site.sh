@@ -4,6 +4,22 @@ set -euo pipefail
 # ====================================================================
 # NEUE WORDPRESS-SITE ERSTELLEN
 # ====================================================================
+#
+# Dieses Skript erstellt eine neue WordPress-Site mit SSL-Zertifikat.
+# Für die SSL-Installation wird ausschließlich das 'certbot --apache'
+# Plugin verwendet, da es die zuverlässigste Methode ist.
+#
+# VERWENDUNG:
+#   create-site <subdomain> [--test]
+#
+# OPTIONEN:
+#   --test    Überspringt die DNS-Erstellung und -Überprüfung
+#
+# BEISPIEL:
+#   create-site kunde1       # Erstellt kunde1.s-neue.website mit SSL
+#   create-site test --test  # Erstellt test.s-neue.website ohne DNS-Prüfung
+#
+# ====================================================================
 
 # Import modules
 # Versuche zuerst den Installationspfad zu finden
@@ -151,8 +167,8 @@ install_wordpress "$SUB" || {
 }
 
 
-# EXAKT DEN ERFOLGREICH GETESTETEN ANSATZ VON direct-ssl.sh VERWENDEN
-echo "🔒 Richte SSL-Zertifikat ein (bewährte Methode)..."
+# SSL-Zertifikat einrichten (bewährte direkte Methode)
+echo "🔒 Richte SSL-Zertifikat mit certbot --apache ein..."
 
 # Zusätzliche DNS-Überprüfung, um sicherzustellen, dass DNS propagiert ist
 echo "🌐 Prüfe DNS-Propagation für ${SUB}.${DOMAIN}..."
@@ -224,27 +240,30 @@ sudo systemctl reload apache2
 # Warte kurz, damit Apache sich neu laden kann
 sleep 2
 
-# 3. SSL direkt mit Apache-Plugin erstellen - Bewährte Methode
-echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache (DIREKTE METHODE)"
-echo "   Dies ist die EINZIGE FUNKTIONIERENDE METHODE!"
-echo "   (Nicht mehr --webroot verwenden, da es fehlerhaft ist)"
+# 3. SSL direkt mit Apache-Plugin erstellen
+echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache"
 sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}" || {
-  echo "⚠️ Certbot (--apache) fehlgeschlagen. Versuche alternative Methode..."
+  echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Versuche alternative Methode..."
   
-  # Versuche die direkte Methode mit unserem bewährten Skript
+  # Versuche das separate direct-ssl.sh Skript
   echo "🔄 Starte alternatives SSL-Setup mit direct-ssl.sh..."
   sudo /opt/website-engine-1.1/bin/direct-ssl.sh "${SUB}.${DOMAIN}" || {
-    echo "⚠️ Beide SSL-Installationsmethoden fehlgeschlagen."
+    echo "❌ SSL-Installation fehlgeschlagen!"
+    echo
     echo "   Mögliche Ursachen:"
     echo "   - DNS-Propagation ist noch nicht abgeschlossen"
     echo "   - Port 80 ist durch anderen Dienst blockiert"
-    echo "   - Certbot hat temporäre Probleme"
+    echo "   - Certbot-Server hat temporäre Probleme"
     echo
-    echo "   Überprüfung der Erreichbarkeit:"
-    echo "   curl -I http://${SUB}.${DOMAIN}/.well-known/acme-challenge/test.txt"
+    echo "   Diagnostik:"
+    echo "   - Überprüfe die DNS-Einträge: dig ${SUB}.${DOMAIN}"
+    echo "   - Teste HTTP-Erreichbarkeit: curl -I http://${SUB}.${DOMAIN}/.well-known/acme-challenge/test.txt"
     echo
-    echo "   Bitte später manuell ausführen:"
-    echo "   sudo /opt/website-engine-1.1/bin/direct-ssl.sh ${SUB}.${DOMAIN}"
+    echo "   Lösung:"
+    echo "   Versuche später die SSL-Installation manuell mit:"
+    echo "   sudo direct-ssl ${SUB}.${DOMAIN}"
+    echo
+    echo "   Die WordPress-Seite ist verfügbar, aber ohne SSL!"
   }
 }
 

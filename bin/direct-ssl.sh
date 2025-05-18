@@ -1,19 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# DIREKTES SSL-SETUP OHNE KOMPLEXITÄT
-# Dieses Skript richtet ein SSL-Zertifikat für eine Domain DIREKT ein
+# ====================================================================
+# DIREKTE SSL-ZERTIFIKAT-INSTALLATION
+# ====================================================================
+#
+# BESCHREIBUNG:
+#   Dieses Skript richtet ein SSL-Zertifikat für eine Domain oder
+#   Subdomain direkt mit certbot --apache ein. Es ist die zuverlässigste
+#   Methode zur SSL-Installation.
+#
+# VERWENDUNG:
+#   direct-ssl <subdomain.domain.tld>
+#   
+#   Beispiel: direct-ssl kunde.s-neue.website
+#
+# HINWEISE:
+#   - Verwendet die --apache certbot Methode (nicht --webroot)
+#   - Prüft DNS-Propagation vor der Installation
+#   - Erstellt automatisch die notwendige Apache-Konfiguration
+#
+# ====================================================================
 
-# Import modules, if available
+# Importiere Module
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Versuche, Konfiguration zu laden (mehrere mögliche Pfade)
 if [[ -f "$(dirname "$SCRIPT_DIR")/modules/config.sh" ]]; then
     source "$(dirname "$SCRIPT_DIR")/modules/config.sh"
 elif [[ -f "/opt/website-engine-1.1/modules/config.sh" ]]; then
     source "/opt/website-engine-1.1/modules/config.sh"
 fi
 
+# Parameter prüfen
 if [ $# -ne 1 ]; then
-  echo "Verwendung: $0 <subdomain.domain>"
+  echo "❌ Fehler: Fehlende Parameter"
+  echo "✏️ Verwendung: $0 <subdomain.domain>"
+  echo "📋 Beispiel: $0 kunde.s-neue.website"
   exit 1
 fi
 
@@ -102,14 +125,24 @@ sudo systemctl reload apache2
 echo "⏳ Warte, bis Apache bereit ist..."
 sleep 5
 
-# 4. SSL direkt mit Apache-Plugin erstellen
-echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache (DIREKTE METHODE)"
-echo "   Dies ist die EINZIGE FUNKTIONIERENDE METHODE!"
-echo "   (Nicht --webroot oder --standalone verwenden, da diese fehlerhaft sind)"
-sudo certbot --apache -n --agree-tos --email "$EMAIL" -d "$FQDN"
-
-# 5. Reload Apache
-echo "🔄 Aktualisiere Apache"
-sudo systemctl reload apache2
-
-echo "✅ SSL für $FQDN erfolgreich eingerichtet!"
+# 4. SSL mit certbot --apache erstellen
+echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache"
+if sudo certbot --apache -n --agree-tos --email "$EMAIL" -d "$FQDN"; then
+  # 5. Reload Apache
+  echo "🔄 Aktualisiere Apache"
+  sudo systemctl reload apache2
+  
+  echo "✅ SSL für $FQDN erfolgreich eingerichtet!"
+  echo "🔗 Die Website ist jetzt unter https://$FQDN verfügbar"
+else
+  echo "❌ SSL-Installation fehlgeschlagen!"
+  echo
+  echo "   Diagnostik:"
+  echo "   - Überprüfe die DNS-Einträge: dig $FQDN"
+  echo "   - Teste HTTP-Erreichbarkeit: curl -I http://$FQDN"
+  echo "   - Prüfe den Apache Status: systemctl status apache2"
+  echo "   - Prüfe die certbot Logs: tail -n 50 /var/log/letsencrypt/letsencrypt.log"
+  echo
+  echo "   Die Website ist ohne SSL unter http://$FQDN verfügbar."
+  exit 1
+fi

@@ -96,6 +96,7 @@ print_success "Skripte ausführbar gemacht"
 print_section "Erstelle Symlinks für Befehle"
 ln -sf /opt/website-engine/bin/create-site.sh /usr/local/bin/create-site
 ln -sf /opt/website-engine/bin/delete-site.sh /usr/local/bin/delete-site
+ln -sf /opt/website-engine/bin/direct-ssl.sh /usr/local/bin/direct-ssl
 ln -sf /opt/website-engine/bin/setup-server.sh /usr/local/bin/setup-server
 print_success "Symlinks erstellt"
 
@@ -156,8 +157,8 @@ echo "Bitte notiere dir das Passwort!"
 
 print_success "Umgebungsdateien erstellt"
 
-# 8. Set up SSL certificate
-print_section "Richte SSL-Zertifikat ein"
+# 8. Set up SSL certificate (using certbot --apache method)
+print_section "Richte SSL-Zertifikat ein (mit certbot --apache)"
 SERVER_IP=$(curl -s https://ifconfig.me)
 SERVER_DOMAIN="$(grep DOMAIN= /opt/website-engine/modules/config.sh | cut -d'"' -f2)"
 

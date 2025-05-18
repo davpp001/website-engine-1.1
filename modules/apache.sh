@@ -4,6 +4,20 @@ set -euo pipefail
 # ====================================================================
 # APACHE VHOST-MANAGEMENT-MODUL
 # ====================================================================
+#
+# Dieses Modul verwaltet Apache Virtual Hosts und SSL-Zertifikate.
+# Es nutzt ausschließlich certbot --apache für SSL-Zertifikate,
+# da dies sich als die zuverlässigste Methode erwiesen hat.
+#
+# FUNKTIONEN:
+# - check_ssl_cert - Prüft, ob ein SSL-Zertifikat existiert
+# - get_ssl_cert_paths - Ermittelt die Pfade für SSL-Zertifikate
+# - create_vhost_config - Erstellt eine vHost-Konfiguration
+# - enable_vhost - Aktiviert einen vHost
+# - setup_vhost - Richtet einen kompletten vHost ein
+# - remove_vhost - Entfernt einen vHost
+#
+# ====================================================================
 
 # Import config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
