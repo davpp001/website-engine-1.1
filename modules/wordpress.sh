@@ -244,7 +244,7 @@ function install_wordpress() {
   # Erstelle wp-config.php mit erhöhter Sicherheit
   if ! sudo -u www-data wp config create --path="$DOCROOT" \
     --dbname="$DB_NAME_LOCAL" --dbuser="$DB_USER_LOCAL" --dbpass="$DB_PASS_LOCAL" \
-    --extra-php <<'PHP'
+    --extra-php <<PHP
 /* Automatisch generierte Salts */
 $WP_SALTS
 
