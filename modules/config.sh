@@ -97,8 +97,16 @@ function check_system_ready() {
   # Prüfe Verzeichnisse und Rechte
   for dir in "$CONFIG_DIR" "$DATA_DIR" "$BACKUP_DIR" "$WP_DIR"; do
     if [[ ! -d "$dir" ]]; then
-      log "ERROR" "Verzeichnis '$dir' nicht gefunden - erstelle es mit root-Rechten"
-      failed=1
+      # Versuche, fehlende Verzeichnisse automatisch zu erstellen
+      log "WARNING" "Verzeichnis '$dir' nicht gefunden - versuche es zu erstellen"
+      if sudo mkdir -p "$dir" 2>/dev/null; then
+        # Setze korrekte Berechtigungen
+        sudo chown www-data:www-data "$dir" 2>/dev/null || true
+        log "SUCCESS" "Verzeichnis '$dir' erfolgreich erstellt"
+      else
+        log "ERROR" "Konnte Verzeichnis '$dir' nicht erstellen - benötige root-Rechte"
+        failed=1
+      fi
     else
       log "INFO" "Verzeichnis '$dir' existiert"
     fi

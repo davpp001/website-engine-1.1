@@ -65,6 +65,16 @@ print_success "Apache-Module aktiviert"
 print_section "Erstelle Verzeichnisstruktur"
 mkdir -p /opt/website-engine/{bin,modules,backup}
 mkdir -p /etc/website-engine/{sites,backup}
+mkdir -p /var/lib/website-engine
+mkdir -p /var/backups/website-engine
+mkdir -p /var/log/website-engine 2>/dev/null || true
+mkdir -p /var/www
+
+# Setze korrekte Berechtigungen
+chown www-data:www-data /var/lib/website-engine
+chown www-data:www-data /var/backups/website-engine
+chown www-data:www-data /var/www
+
 print_success "Verzeichnisstruktur erstellt"
 
 # 4. Copy files to the right locations
