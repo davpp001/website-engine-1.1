@@ -92,12 +92,39 @@ print_success "Symlinks erstellt"
 # 7. Set up environment files
 print_section "Erstelle Umgebungsdateien"
 
-# Cloudflare config
-cat > /etc/profile.d/cloudflare.sh << EOF
+# Cloudflare-Konfiguration
+print_section "Cloudflare-Konfiguration"
+echo "Möchtest du jetzt deine Cloudflare-API-Daten einrichten? (j/n)"
+read -r setup_cloudflare
+
+if [[ "$setup_cloudflare" =~ ^[jJ] ]]; then
+  echo "Bitte gib deinen Cloudflare API-Token ein:"
+  read -r cf_token
+  
+  echo "Bitte gib deine Cloudflare Zone-ID ein:"
+  read -r zone_id
+  
+  # Werte speichern
+  cat > /etc/profile.d/cloudflare.sh << EOF
+export CF_API_TOKEN="$cf_token"
+export ZONE_ID="$zone_id"
+EOF
+  chmod +x /etc/profile.d/cloudflare.sh
+  
+  # Umgebungsvariablen sofort laden
+  export CF_API_TOKEN="$cf_token"
+  export ZONE_ID="$zone_id"
+  
+  print_success "Cloudflare-Konfiguration gespeichert und geladen"
+else
+  # Standard-Template erstellen
+  cat > /etc/profile.d/cloudflare.sh << EOF
 export CF_API_TOKEN="DEIN_CLOUDFLARE_TOKEN"
 export ZONE_ID="DEINE_ZONE_ID"
 EOF
-chmod +x /etc/profile.d/cloudflare.sh
+  chmod +x /etc/profile.d/cloudflare.sh
+  print_warning "Cloudflare-Konfiguration wurde nicht eingerichtet. Du kannst dies später tun, indem du /etc/profile.d/cloudflare.sh bearbeitest."
+fi
 
 # WordPress credentials
 cat > /etc/website-engine/credentials.env << EOF
@@ -108,6 +135,14 @@ WP_USER="admin"
 WP_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)"
 EOF
 chmod 600 /etc/website-engine/credentials.env
+
+# WordPress-Zugangsdaten anzeigen und speichern
+WP_PASS=$(grep "WP_PASS" /etc/website-engine/credentials.env | cut -d'"' -f2)
+print_section "WordPress-Zugangsdaten"
+echo "WordPress-Admin-Benutzer: admin"
+echo "WordPress-Admin-Passwort: $WP_PASS"
+echo "Diese Anmeldedaten werden für alle neuen WordPress-Installationen verwendet."
+echo "Bitte notiere dir das Passwort!"
 
 print_success "Umgebungsdateien erstellt"
 
@@ -121,16 +156,47 @@ if [[ -z "$SERVER_DOMAIN" ]]; then
   SERVER_DOMAIN="s-neue.website"
 fi
 
-print_warning "Du benötigst ein Wildcard-SSL-Zertifikat für *.$SERVER_DOMAIN"
-echo "Möchtest du jetzt ein Zertifikat mit Certbot erstellen? (j/n)"
-read -r response
-if [[ "$response" =~ ^[jJ] ]]; then
-  certbot --apache -d "$SERVER_DOMAIN" -d "*.$SERVER_DOMAIN" --agree-tos --email admin@"$SERVER_DOMAIN"
-  print_success "SSL-Zertifikat erstellt"
+# Admin-E-Mail-Adresse abfragen
+echo "Bitte gib die Admin-E-Mail für das SSL-Zertifikat ein (Standard: admin@$SERVER_DOMAIN):"
+read -r SSL_EMAIL
+SSL_EMAIL=${SSL_EMAIL:-"admin@$SERVER_DOMAIN"}
+
+echo "Soll ein Wildcard-Zertifikat (*.domain.com) erstellt werden? Das erfordert ggf. DNS-Plugins. (j/n)"
+read -r wildcard_response
+
+if [[ "$wildcard_response" =~ ^[jJ] ]]; then
+  print_warning "Versuche ein Wildcard-SSL-Zertifikat für *.$SERVER_DOMAIN zu erstellen..."
+  
+  # Prüfen, ob DNS-Plugin installiert ist
+  if dpkg -l | grep -q "python3-certbot-dns-cloudflare"; then
+    print_success "DNS-Plugin für Cloudflare gefunden"
+    echo "Hinweis: Für ein Wildcard-Zertifikat wird die Datei /etc/letsencrypt/cloudflare/credentials.ini benötigt."
+    echo "Mit deinen Cloudflare API-Zugangsdaten. Erstelle diese, falls noch nicht geschehen."
+    
+    if certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare/credentials.ini \
+      -d "$SERVER_DOMAIN" -d "*.$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"; then
+      print_success "Wildcard-SSL-Zertifikat erfolgreich erstellt!"
+    else
+      print_warning "Wildcard-Zertifikat konnte nicht erstellt werden. Erstelle Standard-Zertifikat..."
+      certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"
+      print_success "Standard-SSL-Zertifikat erstellt"
+    fi
+  else
+    print_warning "Kein DNS-Plugin für Certbot gefunden. Erstelle Standard-Zertifikat..."
+    certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"
+    print_success "Standard-SSL-Zertifikat erstellt"
+    echo "Für ein Wildcard-Zertifikat installiere: sudo apt-get install python3-certbot-dns-cloudflare"
+  fi
 else
-  print_warning "SSL-Zertifikat muss manuell eingerichtet werden."
-  echo "Später mit folgendem Befehl:"
-  echo "certbot --apache -d $SERVER_DOMAIN -d *.$SERVER_DOMAIN --agree-tos --email admin@$SERVER_DOMAIN"
+  print_warning "Erstelle Standard-SSL-Zertifikat für $SERVER_DOMAIN..."
+  if certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"; then
+    print_success "Standard-SSL-Zertifikat erfolgreich erstellt!"
+  else
+    print_error "SSL-Zertifikat konnte nicht erstellt werden."
+    print_warning "SSL-Zertifikat muss manuell eingerichtet werden."
+    echo "Später mit folgendem Befehl:"
+    echo "certbot --apache -d $SERVER_DOMAIN --agree-tos --email $SSL_EMAIL"
+  fi
 fi
 
 # 9. Set up backup scripts
@@ -229,28 +295,44 @@ done
 print_section "SETUP ABGESCHLOSSEN"
 echo -e "${GREEN}Dein Server ist jetzt eingerichtet!${NC}"
 echo
+
+# Prüfen, ob Cloudflare konfiguriert wurde
+if [[ -n "${CF_API_TOKEN:-}" && -n "${ZONE_ID:-}" ]]; then
+  CF_CONFIGURED=1
+else
+  CF_CONFIGURED=0
+fi
+
 echo -e "${YELLOW}Nächste Schritte:${NC}"
-echo "1. Cloudflare-Anmeldedaten einrichten:"
-echo "   Bearbeite /etc/profile.d/cloudflare.sh und füge deine API-Token ein"
-echo "   Dann führe aus: source /etc/profile.d/cloudflare.sh"
-echo
-echo "2. Backup-System konfigurieren:"
+
+if [[ $CF_CONFIGURED -eq 0 ]]; then
+  echo "1. Cloudflare-Anmeldedaten einrichten (falls noch nicht erfolgt):"
+  echo "   Bearbeite /etc/profile.d/cloudflare.sh und füge deine API-Token ein"
+  echo "   Dann führe aus: source /etc/profile.d/cloudflare.sh"
+  echo
+fi
+
+echo "1. Backup-System konfigurieren (optional):"
 echo "   - IONOS-Snapshots: Bearbeite /etc/website-engine/backup/ionos.env"
 echo "   - Restic-Backups: Bearbeite /etc/website-engine/backup/restic.env"
 echo "   - Verschlüssele sensible Dateien mit: website-secrets encrypt"
 echo "   - Manuelles Backup ausführen: website-backup --all"
-echo "   - Backup wiederherstellen: website-restore --help"
 echo
-echo "3. WordPress-Admin-Zugangsdaten prüfen:"
-echo "   Sieh dir an und merke /etc/website-engine/credentials.env"
-echo
-echo "4. Subdomain mit WordPress erstellen:"
+echo "2. Subdomain mit WordPress erstellen:"
 echo "   create-site kunde1"
 echo
-echo "5. Im Testmodus (ohne DNS) erstellen:"
+echo "3. Im Testmodus (ohne DNS) erstellen:"
 echo "   create-site testkunde --test"
 echo
-echo "6. Subdomain mit WordPress löschen:"
+echo "4. Subdomain mit WordPress löschen:"
 echo "   delete-site kunde1"
 echo
+
+# WordPress-Zugangsdaten noch einmal anzeigen
+WP_PASS=$(grep "WP_PASS" /etc/website-engine/credentials.env | cut -d'"' -f2)
+echo -e "${YELLOW}WordPress-Admin-Zugangsdaten:${NC}"
+echo "Benutzer: admin"
+echo "Passwort: $WP_PASS"
+echo
+
 echo -e "${GREEN}Deine Server-IP ist: $SERVER_IP${NC}"
