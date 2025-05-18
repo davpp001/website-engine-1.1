@@ -244,7 +244,7 @@ function install_wordpress() {
   # Erstelle wp-config.php mit erhöhter Sicherheit
   if ! sudo -u www-data wp config create --path="$DOCROOT" \
     --dbname="$DB_NAME_LOCAL" --dbuser="$DB_USER_LOCAL" --dbpass="$DB_PASS_LOCAL" \
-    --extra-php <<PHP
+    --extra-php <<'PHP'
 /* Automatisch generierte Salts */
 $WP_SALTS
 
@@ -254,7 +254,7 @@ define('WP_POST_REVISIONS', 5);
 define('AUTOMATIC_UPDATER_DISABLED', false);
 define('WP_AUTO_UPDATE_CORE', 'minor');
 PHP
-; then
+  then
     log "ERROR" "Konnte wp-config.php nicht erstellen"
     return 1
   fi
