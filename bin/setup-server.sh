@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Color definitions
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Functions
+function print_section() {
+  echo -e "\n${BLUE}$1${NC}"
+  echo "========================================"
+}
+
+function print_success() {
+  echo -e "${GREEN}✓ $1${NC}"
+}
+
+function print_warning() {
+  echo -e "${YELLOW}⚠️ $1${NC}"
+}
+
+function print_error() {
+  echo -e "${RED}❌ $1${NC}"
+}
+
+# Show header
+print_section "WEBSITE ENGINE - SERVER SETUP"
+echo "Dieses Skript richtet die Website Engine Umgebung ein."
+
+# Check if running as root or with sudo
+if [ "$(id -u)" -ne 0 ]; then
+  print_error "Dieses Skript muss als Root oder mit sudo ausgeführt werden."
+  exit 1
+fi
+
+# 1. Install required packages
+print_section "Installiere benötigte Pakete"
+apt-get update
+apt-get install -y apache2 mysql-server php php-cli php-mysql php-curl php-xml \
+  php-mbstring php-zip php-gd php-intl libapache2-mod-php curl jq certbot python3-certbot-apache
+
+# Install WP-CLI if not already installed
+if ! command -v wp >/dev/null 2>&1; then
+  print_section "Installiere WP-CLI"
+  curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+  chmod +x wp-cli.phar
+  mv wp-cli.phar /usr/local/bin/wp
+  print_success "WP-CLI installiert"
+fi
+
+# Install necessary tools for backups
+print_section "Installiere Backup-Tools"
+apt-get install -y restic
+
+# 2. Enable Apache modules
+print_section "Aktiviere Apache-Module"
+a2enmod rewrite ssl
+systemctl reload apache2
+print_success "Apache-Module aktiviert"
+
+# 3. Create directory structure
+print_section "Erstelle Verzeichnisstruktur"
+mkdir -p /opt/website-engine/{bin,modules,backup}
+mkdir -p /etc/website-engine/{sites,backup}
+print_success "Verzeichnisstruktur erstellt"
+
+# 4. Copy files to the right locations
+print_section "Kopiere Dateien an die richtigen Orte"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(dirname "$SCRIPT_DIR")"
+
+cp -r "$BASE_DIR/bin/"* /opt/website-engine/bin/
+cp -r "$BASE_DIR/modules/"* /opt/website-engine/modules/
+cp -r "$BASE_DIR/backup/"* /opt/website-engine/backup/ 2>/dev/null || true
+print_success "Dateien kopiert"
+
+# 5. Make scripts executable
+chmod +x /opt/website-engine/bin/*.sh
+chmod +x /opt/website-engine/modules/*.sh
+print_success "Skripte ausführbar gemacht"
+
+# 6. Create symlinks
+print_section "Erstelle Symlinks für Befehle"
+ln -sf /opt/website-engine/bin/create-site.sh /usr/local/bin/create-site
+ln -sf /opt/website-engine/bin/delete-site.sh /usr/local/bin/delete-site
+ln -sf /opt/website-engine/bin/setup-server.sh /usr/local/bin/setup-server
+print_success "Symlinks erstellt"
+
+# 7. Set up environment files
+print_section "Erstelle Umgebungsdateien"
+
+# Cloudflare config
+cat > /etc/profile.d/cloudflare.sh << EOF
+export CF_API_TOKEN="DEIN_CLOUDFLARE_TOKEN"
+export ZONE_ID="DEINE_ZONE_ID"
+EOF
+chmod +x /etc/profile.d/cloudflare.sh
+
+# WordPress credentials
+cat > /etc/website-engine/credentials.env << EOF
+# WordPress-Admin-Zugangsdaten
+DB_USER="we-admin"
+DB_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)"
+WP_USER="admin"
+WP_PASS="$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)"
+EOF
+chmod 600 /etc/website-engine/credentials.env
+
+print_success "Umgebungsdateien erstellt"
+
+# 8. Set up SSL certificate
+print_section "Richte SSL-Zertifikat ein"
+SERVER_IP=$(curl -s https://ifconfig.me)
+SERVER_DOMAIN="$(grep DOMAIN= /opt/website-engine/modules/config.sh | cut -d'"' -f2)"
+
+if [[ -z "$SERVER_DOMAIN" ]]; then
+  print_warning "Domain konnte nicht aus der Konfiguration gelesen werden."
+  SERVER_DOMAIN="s-neue.website"
+fi
+
+print_warning "Du benötigst ein Wildcard-SSL-Zertifikat für *.$SERVER_DOMAIN"
+echo "Möchtest du jetzt ein Zertifikat mit Certbot erstellen? (j/n)"
+read -r response
+if [[ "$response" =~ ^[jJ] ]]; then
+  certbot --apache -d "$SERVER_DOMAIN" -d "*.$SERVER_DOMAIN" --agree-tos --email admin@"$SERVER_DOMAIN"
+  print_success "SSL-Zertifikat erstellt"
+else
+  print_warning "SSL-Zertifikat muss manuell eingerichtet werden."
+  echo "Später mit folgendem Befehl:"
+  echo "certbot --apache -d $SERVER_DOMAIN -d *.$SERVER_DOMAIN --agree-tos --email admin@$SERVER_DOMAIN"
+fi
+
+# 9. Set up backup scripts
+print_section "Richte Backup-System ein"
+
+# Erforderliche Verzeichnisse
+mkdir -p /var/backups/mysql
+chmod 700 /var/backups/mysql
+mkdir -p /etc/website-engine/backup
+chmod 750 /etc/website-engine/backup
+
+# Kopiere alle Backup-Skripte
+cp -f "$BASE_DIR/backup/"*.sh /opt/website-engine/backup/
+chmod +x /opt/website-engine/backup/*.sh
+print_success "Backup-Skripte kopiert"
+
+# Erstelle IONOS-Konfigurationsdatei aus Template
+if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
+  cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
+  chmod 600 /etc/website-engine/backup/ionos.env
+  print_success "IONOS-Konfigurationsvorlage erstellt"
+else 
+  print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
+  cat > /etc/website-engine/backup/ionos.env << 'EOF'
+# IONOS Cloud API Konfiguration
+IONOS_TOKEN=""
+IONOS_SERVER_ID=""
+IONOS_VOLUME_ID=""
+EOF
+  chmod 600 /etc/website-engine/backup/ionos.env
+fi
+
+# Erstelle Restic-Konfigurationsdatei
+cat > /etc/website-engine/backup/restic.env << 'EOF'
+# Restic configuration
+export RESTIC_REPOSITORY=""  # z.B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups
+export RESTIC_PASSWORD=""    # Ein sicheres Passwort für die Repository-Verschlüsselung
+export AWS_ACCESS_KEY_ID=""  # S3 Access Key
+export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
+EOF
+chmod 600 /etc/website-engine/backup/restic.env
+
+# Erstelle Symlinks für Backup-Befehle
+ln -sf /opt/website-engine/backup/backup-all.sh /usr/local/bin/website-backup
+ln -sf /opt/website-engine/backup/restore.sh /usr/local/bin/website-restore
+ln -sf /opt/website-engine/backup/secrets-encrypt.sh /usr/local/bin/website-secrets
+print_success "Backup-Befehlssymlinks erstellt"
+
+# Setup cron jobs
+print_section "Richte Cron-Jobs ein"
+(crontab -l 2>/dev/null || true; echo "0 3 * * * /opt/website-engine/backup/backup-all.sh --mysql") | crontab -
+(crontab -l 2>/dev/null || true; echo "0 1 * * * /opt/website-engine/backup/ionos-snapshot.sh") | crontab -
+(crontab -l 2>/dev/null || true; echo "30 2 * * * /opt/website-engine/backup/backup-all.sh --restic") | crontab -
+print_success "Cron-Jobs eingerichtet"
+
+# Verschlüsselung für sensible Dateien anbieten
+print_section "Sichere Konfiguration"
+echo "Möchten Sie sensible Konfigurationsdateien verschlüsseln? (j/n)"
+read -r response
+if [[ "$response" =~ ^[jJyY] ]]; then
+  echo "Starte Verschlüsselung mit website-secrets..."
+  /usr/local/bin/website-secrets encrypt
+  print_success "Verschlüsselung abgeschlossen"
+else
+  print_warning "Konfigurationsdateien wurden nicht verschlüsselt. Sie können dies später mit 'website-secrets encrypt' nachholen."
+fi
+
+# 10. Final check
+print_section "Abschließende Prüfung"
+# Check command symlinks
+for cmd in create-site delete-site setup-server; do
+  if [ -L "/usr/local/bin/$cmd" ]; then
+    print_success "Befehl $cmd ist korrekt verlinkt"
+  else
+    print_error "Befehl $cmd ist nicht korrekt verlinkt"
+  fi
+done
+
+# Check Apache is running
+if systemctl is-active --quiet apache2; then
+  print_success "Apache läuft"
+else
+  print_error "Apache läuft nicht"
+fi
+
+# Check required directories
+for dir in /opt/website-engine /etc/website-engine; do
+  if [ -d "$dir" ]; then
+    print_success "Verzeichnis $dir existiert"
+  else
+    print_error "Verzeichnis $dir fehlt"
+  fi
+done
+
+# 11. Instructions for the user
+print_section "SETUP ABGESCHLOSSEN"
+echo -e "${GREEN}Dein Server ist jetzt eingerichtet!${NC}"
+echo
+echo -e "${YELLOW}Nächste Schritte:${NC}"
+echo "1. Cloudflare-Anmeldedaten einrichten:"
+echo "   Bearbeite /etc/profile.d/cloudflare.sh und füge deine API-Token ein"
+echo "   Dann führe aus: source /etc/profile.d/cloudflare.sh"
+echo
+echo "2. Backup-System konfigurieren:"
+echo "   - IONOS-Snapshots: Bearbeite /etc/website-engine/backup/ionos.env"
+echo "   - Restic-Backups: Bearbeite /etc/website-engine/backup/restic.env"
+echo "   - Verschlüssele sensible Dateien mit: website-secrets encrypt"
+echo "   - Manuelles Backup ausführen: website-backup --all"
+echo "   - Backup wiederherstellen: website-restore --help"
+echo
+echo "3. WordPress-Admin-Zugangsdaten prüfen:"
+echo "   Sieh dir an und merke /etc/website-engine/credentials.env"
+echo
+echo "4. Subdomain mit WordPress erstellen:"
+echo "   create-site kunde1"
+echo
+echo "5. Im Testmodus (ohne DNS) erstellen:"
+echo "   create-site testkunde --test"
+echo
+echo "6. Subdomain mit WordPress löschen:"
+echo "   delete-site kunde1"
+echo
+echo -e "${GREEN}Deine Server-IP ist: $SERVER_IP${NC}"

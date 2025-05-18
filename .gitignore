@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Ansible-, Vault- oder Backup-Artefakte
+config/vault/
+scripts/backup/
+# WordPress-Uploads (falls vorhanden)
+wp-content/uploads/
+
+# Secrets
+*.pem
+*.env
