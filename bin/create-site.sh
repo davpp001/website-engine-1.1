@@ -187,6 +187,14 @@ echo "📝 Erstelle Apache-Konfiguration"
 sudo a2dissite "*${SUB}*" &>/dev/null || true
 sudo rm -f "/etc/apache2/sites-available/*${SUB}*" &>/dev/null || true
 
+# Stelle sicher, dass Verzeichnis existiert und .well-known Ordner angelegt ist
+sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
+sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
+
+# Erstelle Test-Dateien für ACME Challenge (hilfreich für Debugging)
+echo "This is an ACME challenge directory test file" | sudo tee "${WP_DIR}/${SUB}/.well-known/acme-challenge/test.txt" > /dev/null
+sudo chmod 644 "${WP_DIR}/${SUB}/.well-known/acme-challenge/test.txt"
+
 # Einfache neue Konfiguration
 sudo tee "/etc/apache2/sites-available/${SUB}.conf" > /dev/null << EOF
 <VirtualHost *:80>
@@ -216,10 +224,12 @@ sudo systemctl reload apache2
 # Warte kurz, damit Apache sich neu laden kann
 sleep 2
 
-# 3. SSL direkt mit Apache-Plugin erstellen - EXAKT wie im funktionierenden Skript
-echo "🔐 Erstelle und installiere SSL-Zertifikat"
+# 3. SSL direkt mit Apache-Plugin erstellen - Bewährte Methode
+echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache (DIREKTE METHODE)"
+echo "   Dies ist die EINZIGE FUNKTIONIERENDE METHODE!"
+echo "   (Nicht mehr --webroot verwenden, da es fehlerhaft ist)"
 sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}" || {
-  echo "⚠️ Certbot fehlgeschlagen. Versuche alternative Methode..."
+  echo "⚠️ Certbot (--apache) fehlgeschlagen. Versuche alternative Methode..."
   
   # Versuche die direkte Methode mit unserem bewährten Skript
   echo "🔄 Starte alternatives SSL-Setup mit direct-ssl.sh..."
@@ -229,6 +239,9 @@ sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}" 
     echo "   - DNS-Propagation ist noch nicht abgeschlossen"
     echo "   - Port 80 ist durch anderen Dienst blockiert"
     echo "   - Certbot hat temporäre Probleme"
+    echo
+    echo "   Überprüfung der Erreichbarkeit:"
+    echo "   curl -I http://${SUB}.${DOMAIN}/.well-known/acme-challenge/test.txt"
     echo
     echo "   Bitte später manuell ausführen:"
     echo "   sudo /opt/website-engine-1.1/bin/direct-ssl.sh ${SUB}.${DOMAIN}"

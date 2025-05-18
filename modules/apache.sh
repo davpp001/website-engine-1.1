@@ -73,12 +73,34 @@ function check_ssl_cert() {
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
     log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    # Erstelle Webroot-Verzeichnis 
+    # Stelle sicher, dass Verzeichnis existiert
     local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
-    sudo mkdir -p "$DOMAIN_DOCROOT/.well-known/acme-challenge"
+    sudo mkdir -p "$DOMAIN_DOCROOT"
     sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
     
-    if sudo certbot certonly --webroot --webroot-path="$DOMAIN_DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+    # Erstelle einfache VirtualHost-Konfiguration für das SSL-Zertifikat
+    sudo tee "/etc/apache2/sites-available/${DOMAIN_TO_CHECK}.conf" > /dev/null << EOF
+<VirtualHost *:80>
+  ServerName ${DOMAIN_TO_CHECK}
+  DocumentRoot ${DOMAIN_DOCROOT}
+  
+  <Directory ${DOMAIN_DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+EOF
+    
+    # Aktiviere die Konfiguration
+    sudo a2ensite "${DOMAIN_TO_CHECK}.conf"
+    sudo systemctl reload apache2
+    
+    # Kurze Wartezeit für Apache reload
+    sleep 5
+    
+    # Verwende das Apache-Plugin für Certbot statt Webroot (zuverlässiger)
+    if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
       log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
@@ -118,22 +140,54 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        # Erstelle Webroot-Verzeichnis, falls es noch nicht existiert
+        # Erstelle Verzeichnis, falls es noch nicht existiert
         local DOMAIN_DOCROOT="${WP_DIR}/${DOMAIN_TO_CHECK%%.*}"
-        sudo mkdir -p "$DOMAIN_DOCROOT/.well-known/acme-challenge"
+        sudo mkdir -p "$DOMAIN_DOCROOT"
         sudo chown -R www-data:www-data "$DOMAIN_DOCROOT"
         
-        if sudo certbot certonly --webroot --webroot-path="$DOMAIN_DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+        # Erstelle einfache VirtualHost-Konfiguration für das SSL-Zertifikat
+        local SUB="${DOMAIN_TO_CHECK%%.*}"
+        log "INFO" "Erstelle temporäre Apache-Konfiguration für SSL-Zertifikat von $DOMAIN_TO_CHECK"
+        
+        sudo tee "/etc/apache2/sites-available/${SUB}-temp.conf" > /dev/null << EOF
+<VirtualHost *:80>
+  ServerName ${DOMAIN_TO_CHECK}
+  DocumentRoot ${DOMAIN_DOCROOT}
+  
+  <Directory ${DOMAIN_DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+EOF
+        
+        # Aktiviere die Site für SSL-Validierung
+        sudo a2ensite "${SUB}-temp.conf"
+        sudo systemctl reload apache2
+        sleep 5
+        
+        # Verwende jetzt das Apache-Plugin für SSL
+        if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
           log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
           
-          # Die Installation in Apache erfolgt später durch create_vhost_config und enable_vhost
+          # Certbot hat bereits eine SSL-Version erstellt, also müssen wir hier nichts mehr tun
+          # Wir löschen später die temporäre Konfiguration, wenn wir die richtige VHost-Konfiguration erstellen
+          sudo a2dissite "${SUB}-temp.conf"
+          sudo rm -f "/etc/apache2/sites-available/${SUB}-temp.conf"
+          sudo systemctl reload apache2
         else
           log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
           # Verwende Standardzertifikat als Fallback (wird wahrscheinlich Fehler verursachen)
           CERT_PATH="$SSL_CERT_PATH"
           KEY_PATH="$SSL_KEY_PATH"
+          
+          # Entferne die temporäre Konfiguration
+          sudo a2dissite "${SUB}-temp.conf"
+          sudo rm -f "/etc/apache2/sites-available/${SUB}-temp.conf"
+          sudo systemctl reload apache2
         fi
       fi
     else
@@ -188,43 +242,46 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Webroot-basierte Zertifikatserstellung (Apache bleibt aktiv)
-      # 1. Erstelle die Webroot-Verzeichnisstruktur
-      sudo mkdir -p "$DOCROOT/.well-known/acme-challenge"
-      sudo chown -R www-data:www-data "$DOCROOT"
+      # Apache-basierte Zertifikatserstellung (direkte Methode)
+      # Diese Methode funktioniert zuverlässiger als webroot
+      log "INFO" "Erstelle SSL-Zertifikat mit Apache-Plugin für $FQDN..."
       
-      # 2. Erstelle Zertifikat mit webroot
-      if sudo certbot certonly --webroot --webroot-path="$DOCROOT" --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
-        log "INFO" "SSL-Zertifikat für $FQDN erfolgreich erstellt, installiere jetzt in Apache..."
-        
-        # Erstelle zuerst einen einfachen VirtualHost mit ServerName für diese Domain
-        sudo tee "/etc/apache2/sites-available/$FQDN-base.conf" > /dev/null << EOF
+      # 1. Stelle sicher, dass der VirtualHost korrekt konfiguriert ist
+      # Erstelle einen einfachen VirtualHost mit ServerName für diese Domain
+      sudo tee "/etc/apache2/sites-available/$FQDN.conf" > /dev/null << EOF
 <VirtualHost *:80>
   ServerName $FQDN
   DocumentRoot ${WP_DIR}/${SUB}
+  
+  <Directory ${WP_DIR}/${SUB}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+  
+  # Unterstützung für ACME-Challenge
+  <Directory "${WP_DIR}/${SUB}/.well-known/acme-challenge">
+    Options None
+    AllowOverride None
+    Require all granted
+  </Directory>
 </VirtualHost>
 EOF
-        sudo a2ensite "$FQDN-base.conf"
-        sudo systemctl reload apache2
+
+      # 2. Aktiviere den VirtualHost
+      sudo a2ensite "$FQDN.conf"
+      sudo systemctl reload apache2
+      
+      # Kurze Pause für Apache reload
+      sleep 5
+      
+      # 3. Erstelle und installiere Zertifikat mit dem Apache-Plugin
+      if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
+        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt und installiert"
         
-        # Jetzt installiere das Zertifikat in Apache
-        if sudo certbot install --cert-name "$FQDN" --non-interactive; then
-          log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich installiert"
-          
-          # Aktualisiere Pfade
-          CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
-          KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
-          
-          # Deaktiviere den temporären VHost, da Certbot einen mit SSL erstellt hat
-          sudo a2dissite "$FQDN-base.conf"
-          sudo systemctl reload apache2
-        else
-          log "WARNING" "Zertifikat erstellt, aber Installation fehlgeschlagen. Versuche manuellen Ansatz..."
-          
-          # Verwende die Pfade trotzdem
-          CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
-          KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
-        fi
+        # Aktualisiere Pfade
+        CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
+        KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
       else
         log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird mit Standard-Zertifikat konfiguriert."
         CERT_PATH="$SSL_CERT_PATH"

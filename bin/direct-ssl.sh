@@ -51,17 +51,19 @@ else
   echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
 fi
 
-# 1. Stelle sicher, dass das Verzeichnis existiert
-if [ ! -d "$DOCROOT" ]; then
-  echo "ℹ️ Erstelle Verzeichnis $DOCROOT"
-  sudo mkdir -p "$DOCROOT"
-  sudo chown -R www-data:www-data "$DOCROOT"
+# 1. Stelle sicher, dass das Verzeichnis und ACME-Challenge-Verzeichnis existieren
+echo "ℹ️ Stelle Verzeichnisstruktur für $DOCROOT sicher"
+sudo mkdir -p "$DOCROOT/.well-known/acme-challenge"
+sudo chown -R www-data:www-data "$DOCROOT"
+
+# Erstelle eine Test-Datei, wenn das Verzeichnis neu ist
+if [ ! -f "$DOCROOT/index.php" ]; then
   echo "<?php echo 'SSL-Test für ${FQDN}'; ?>" | sudo tee "$DOCROOT/index.php" > /dev/null
 fi
 
-# Stelle sicher, dass .well-known/acme-challenge existiert und richtige Berechtigungen hat
-sudo mkdir -p "$DOCROOT/.well-known/acme-challenge"
-sudo chown -R www-data:www-data "$DOCROOT/.well-known"
+# Erstelle auch eine Test-Datei im ACME-Challenge-Verzeichnis für bessere Fehlerbehebung
+echo "This is an ACME challenge directory test file" | sudo tee "$DOCROOT/.well-known/acme-challenge/test.txt" > /dev/null
+sudo chmod 644 "$DOCROOT/.well-known/acme-challenge/test.txt"
 
 # 2. Erstelle einfache Apache-Konfiguration
 echo "📝 Erstelle Apache-Konfiguration"
@@ -101,7 +103,9 @@ echo "⏳ Warte, bis Apache bereit ist..."
 sleep 5
 
 # 4. SSL direkt mit Apache-Plugin erstellen
-echo "🔐 Erstelle und installiere SSL-Zertifikat"
+echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache (DIREKTE METHODE)"
+echo "   Dies ist die EINZIGE FUNKTIONIERENDE METHODE!"
+echo "   (Nicht --webroot oder --standalone verwenden, da diese fehlerhaft sind)"
 sudo certbot --apache -n --agree-tos --email "$EMAIL" -d "$FQDN"
 
 # 5. Reload Apache
