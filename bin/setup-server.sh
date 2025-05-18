@@ -224,31 +224,81 @@ cp -f "$BASE_DIR/backup/"*.sh /opt/website-engine/backup/
 chmod +x /opt/website-engine/backup/*.sh
 print_success "Backup-Skripte kopiert"
 
-# Erstelle IONOS-Konfigurationsdatei aus Template
-if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
-  cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
-  chmod 600 /etc/website-engine/backup/ionos.env
-  print_success "IONOS-Konfigurationsvorlage erstellt"
-else 
-  print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
-  cat > /etc/website-engine/backup/ionos.env << 'EOF'
+# Backup-Konfiguration einrichten
+source "/opt/website-engine/modules/config.sh"
+
+print_section "Backup-Konfiguration"
+echo "Möchtest du jetzt die Backup-Systeme konfigurieren? (j/n)"
+read -r setup_backup
+
+if [[ "$setup_backup" =~ ^[jJ] ]]; then
+  # Prüfen, ob die Funktion verfügbar ist
+  if type configure_backup_systems &>/dev/null; then
+    configure_backup_systems
+    print_success "Backup-Systeme wurden konfiguriert"
+  else
+    print_warning "Die Funktion configure_backup_systems wurde nicht gefunden."
+    print_warning "Möglicherweise wird eine ältere Version von config.sh verwendet."
+    
+    # Erstelle IONOS-Konfigurationsdatei aus Template
+    if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
+      cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
+      chmod 600 /etc/website-engine/backup/ionos.env
+      print_success "IONOS-Konfigurationsvorlage erstellt"
+    else 
+      print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
+      cat > /etc/website-engine/backup/ionos.env << 'EOF'
 # IONOS Cloud API Konfiguration
 IONOS_TOKEN=""
 IONOS_SERVER_ID=""
 IONOS_VOLUME_ID=""
 EOF
-  chmod 600 /etc/website-engine/backup/ionos.env
-fi
+      chmod 600 /etc/website-engine/backup/ionos.env
+    fi
 
-# Erstelle Restic-Konfigurationsdatei
-cat > /etc/website-engine/backup/restic.env << 'EOF'
+    # Erstelle Restic-Konfigurationsdatei
+    cat > /etc/website-engine/backup/restic.env << 'EOF'
 # Restic configuration
 export RESTIC_REPOSITORY=""  # z.B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups
 export RESTIC_PASSWORD=""    # Ein sicheres Passwort für die Repository-Verschlüsselung
 export AWS_ACCESS_KEY_ID=""  # S3 Access Key
 export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
 EOF
-chmod 600 /etc/website-engine/backup/restic.env
+    chmod 600 /etc/website-engine/backup/restic.env
+    
+    print_warning "Die Backup-Konfigurationsdateien wurden erstellt, müssen aber manuell bearbeitet werden."
+  fi
+else
+  # Erstelle leere Konfigurationsdateien für spätere Verwendung
+  print_warning "Backup-Systeme werden nicht jetzt konfiguriert."
+  
+  # Erstelle IONOS-Konfigurationsdatei aus Template
+  if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
+    cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
+    chmod 600 /etc/website-engine/backup/ionos.env
+    print_success "IONOS-Konfigurationsvorlage erstellt"
+  else 
+    print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
+    cat > /etc/website-engine/backup/ionos.env << 'EOF'
+# IONOS Cloud API Konfiguration
+IONOS_TOKEN=""
+IONOS_SERVER_ID=""
+IONOS_VOLUME_ID=""
+EOF
+    chmod 600 /etc/website-engine/backup/ionos.env
+  fi
+
+  # Erstelle Restic-Konfigurationsdatei
+  cat > /etc/website-engine/backup/restic.env << 'EOF'
+# Restic configuration
+export RESTIC_REPOSITORY=""  # z.B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups
+export RESTIC_PASSWORD=""    # Ein sicheres Passwort für die Repository-Verschlüsselung
+export AWS_ACCESS_KEY_ID=""  # S3 Access Key
+export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
+EOF
+  chmod 600 /etc/website-engine/backup/restic.env
+  print_warning "Du kannst die Backup-Systeme später über die Backup-Skripte konfigurieren."
+fi
 
 # Erstelle Symlinks für Backup-Befehle
 ln -sf /opt/website-engine/backup/backup-all.sh /usr/local/bin/website-backup
@@ -323,11 +373,45 @@ if [[ $CF_CONFIGURED -eq 0 ]]; then
   echo
 fi
 
-echo "1. Backup-System konfigurieren (optional):"
-echo "   - IONOS-Snapshots: Bearbeite /etc/website-engine/backup/ionos.env"
-echo "   - Restic-Backups: Bearbeite /etc/website-engine/backup/restic.env"
-echo "   - Verschlüssele sensible Dateien mit: website-secrets encrypt"
-echo "   - Manuelles Backup ausführen: website-backup --all"
+# Prüfen, ob Backup-Systeme konfiguriert wurden
+IONOS_CONFIG="/etc/website-engine/backup/ionos.env"
+RESTIC_CONFIG="/etc/website-engine/backup/restic.env"
+BACKUP_CONFIGURED=1
+
+# Prüfe IONOS-Konfiguration
+if [[ -f "$IONOS_CONFIG" ]]; then
+  source "$IONOS_CONFIG" 2>/dev/null || true
+  if [[ -z "${IONOS_TOKEN:-}" || -z "${IONOS_SERVER_ID:-}" || -z "${IONOS_VOLUME_ID:-}" ]]; then
+    BACKUP_CONFIGURED=0
+  fi
+else
+  BACKUP_CONFIGURED=0
+fi
+
+# Prüfe Restic-Konfiguration
+if [[ -f "$RESTIC_CONFIG" ]]; then
+  source "$RESTIC_CONFIG" 2>/dev/null || true
+  if [[ -z "${RESTIC_REPOSITORY:-}" || -z "${RESTIC_PASSWORD:-}" ]]; then
+    BACKUP_CONFIGURED=0
+  fi
+else
+  BACKUP_CONFIGURED=0
+fi
+
+if [[ $BACKUP_CONFIGURED -eq 0 ]]; then
+  echo "1. Backup-System konfigurieren (noch nicht vollständig eingerichtet):"
+  echo "   - Konfiguriere automatisch mit: /opt/website-engine/backup/backup-all.sh"
+  echo "   - Oder manuelle Konfiguration:"
+  echo "     - IONOS-Snapshots: Bearbeite /etc/website-engine/backup/ionos.env"
+  echo "     - Restic-Backups: Bearbeite /etc/website-engine/backup/restic.env"
+  echo "   - Verschlüssele sensible Dateien mit: website-secrets encrypt"
+  echo "   - Manuelles Backup ausführen: website-backup --all"
+else
+  echo "1. Backup-System ist konfiguriert. Weitere Optionen:"
+  echo "   - Manuelles Backup ausführen: website-backup --all"
+  echo "   - Sensible Dateien verschlüsseln: website-secrets encrypt"
+  echo "   - Backup-Konfiguration anpassen: bearbeite /etc/website-engine/backup/*.env"
+fi
 echo
 echo "2. Subdomain mit WordPress erstellen:"
 echo "   create-site kunde1"

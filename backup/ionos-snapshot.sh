@@ -59,7 +59,24 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 else
   log "WARNING" "IONOS-Konfigurationsdatei $CONFIG_FILE nicht gefunden."
-  log "WARNING" "Verwende Umgebungsvariablen, falls vorhanden."
+  log "WARNING" "Versuche die Konfiguration interaktiv zu erstellen..."
+  
+  # Prüfe, ob die Konfigurationsfunktion verfügbar ist
+  if type configure_backup_systems &>/dev/null; then
+    configure_backup_systems
+    
+    # Nach der Konfiguration erneut versuchen, die Datei zu laden
+    if [[ -f "$CONFIG_FILE" ]]; then
+      log "INFO" "Lade neu erstellte IONOS-Konfiguration aus $CONFIG_FILE"
+      source "$CONFIG_FILE"
+    else
+      log "WARNING" "Konfigurationsdatei konnte nicht erstellt werden."
+      log "WARNING" "Verwende Umgebungsvariablen, falls vorhanden."
+    fi
+  else
+    log "WARNING" "Konfigurationsfunktion nicht verfügbar."
+    log "WARNING" "Verwende Umgebungsvariablen, falls vorhanden."
+  fi
 fi
 
 # Prüfe notwendige Umgebungsvariablen

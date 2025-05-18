@@ -93,6 +93,16 @@ echo "🕒 Startzeit: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "====================================================================="
 log "INFO" "Starte vollständiges Backup..."
 
+# Prüfe und konfiguriere Backup-Systeme bei Bedarf
+if [[ $DO_IONOS -eq 1 || $DO_RESTIC -eq 1 ]]; then
+  # Nur wenn IONOS oder Restic Backups geplant sind
+  if type configure_backup_systems &>/dev/null; then
+    configure_backup_systems
+  else
+    log "WARNING" "Funktion configure_backup_systems nicht gefunden. Möglicherweise wird eine ältere Version von config.sh verwendet."
+  fi
+fi
+
 # Status-Funktion für Backup-Fortschritt
 status_msg() {
   local level="$1"
