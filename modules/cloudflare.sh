@@ -212,16 +212,37 @@ function wait_for_dns() {
   
   echo -n "⏳ Warte auf DNS-Aktivierung von ${FQDN} "
   
+  # Zuerst mit der Cloudflare-API prüfen, ob der Eintrag existiert
+  if [[ -n "${CF_API_TOKEN:-}" && -n "${ZONE_ID:-}" ]]; then
+    # Cloudflare API direkt abfragen
+    local cf_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+      -H "Authorization: Bearer ${CF_API_TOKEN}" \
+      -H "Content-Type: application/json" | jq -r --arg name "${FQDN}" '.result[] | select(.name==$name and .type=="A")')
+    
+    if [[ -n "$cf_response" ]]; then
+      log "INFO" "DNS-Eintrag in Cloudflare gefunden, setze DNS-Prüfung fort"
+    else
+      log "WARNING" "DNS-Eintrag in Cloudflare nicht gefunden, fahre trotzdem fort"
+    fi
+  fi
+  
   while [[ $elapsed -lt $MAX_WAIT && $propagated -eq 0 ]]; do
     # Führe verschiedene Prüfungen durch, um DNS-Propagation zu bestätigen
     
-    # 1. Prüfe mit dig
+    # 1. Prüfe mit dig gegen Cloudflare-DNS direkt
+    if dig @1.1.1.1 +short "${FQDN}" | grep -q "$SERVER_IP"; then
+      log "SUCCESS" "DNS-Eintrag über Cloudflare-DNS (1.1.1.1) bestätigt"
+      propagated=1
+      break
+    fi
+    
+    # 2. Prüfe mit dig (allgemein)
     if dig +short "${FQDN}" | grep -q "$SERVER_IP"; then
       propagated=1
       break
     fi
     
-    # 2. Prüfe mit nslookup
+    # 3. Prüfe mit nslookup
     if command -v nslookup &>/dev/null; then
       if nslookup "${FQDN}" 2>/dev/null | grep -q "$SERVER_IP"; then
         propagated=1
@@ -229,7 +250,7 @@ function wait_for_dns() {
       fi
     fi
     
-    # 3. Prüfe mit host
+    # 4. Prüfe mit host
     if command -v host &>/dev/null; then
       if host "${FQDN}" 2>/dev/null | grep -q "$SERVER_IP"; then
         propagated=1

@@ -230,6 +230,14 @@ function install_wordpress() {
   # 2. Lade WordPress-Core herunter
   log "INFO" "Lade WordPress-Core herunter"
   
+  # Prüfe, ob bereits WordPress-Dateien vorhanden sind
+  if [[ -f "$DOCROOT/wp-config.php" || -d "$DOCROOT/wp-admin" ]]; then
+    log "WARNING" "WordPress-Dateien scheinen bereits vorhanden zu sein. Bereinige Verzeichnis..."
+    sudo rm -rf "$DOCROOT"
+    sudo mkdir -p "$DOCROOT"
+    sudo chown www-data:www-data "$DOCROOT"
+  fi
+  
   if ! sudo -u www-data wp core download --path="$DOCROOT" --quiet; then
     log "ERROR" "Konnte WordPress-Core nicht herunterladen"
     return 1
