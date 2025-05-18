@@ -236,7 +236,7 @@ function setup_vhost() {
       log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
       return 1
     }
-  }
+  fi
   
   # 4. Aktiviere vHost
   enable_vhost "$SUB" || {
