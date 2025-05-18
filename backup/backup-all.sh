@@ -24,6 +24,8 @@ usage() {
   echo "  --restic        Nur Restic File-Backup ausführen"
   echo "  --only-site=SUB Nur Backup für eine bestimmte Subdomain ausführen"
   echo "  --verbose       Ausführliche Ausgabe aktivieren"
+  echo "  --s3            Bevorzuge S3-Storage für Backups (Restic und MySQL)"
+  echo "  --local         Bevorzuge lokale Speicherung (kein S3-Upload)"
   echo "  --help          Diese Hilfe anzeigen"
   echo
   exit 1
@@ -35,6 +37,8 @@ DO_IONOS=0
 DO_RESTIC=0
 VERBOSE=0
 ONLY_SITE=""
+USE_S3=1     # Standard: S3 verwenden wenn konfiguriert
+FORCE_LOCAL=0 # Standard: Nicht erzwingen, dass Backups lokal bleiben
 
 # Keine Option bedeutet alle
 if [[ $# -eq 0 ]]; then
@@ -72,6 +76,16 @@ while [[ $# -gt 0 ]]; do
       VERBOSE=1
       shift
       ;;
+    --s3)
+      USE_S3=1
+      FORCE_LOCAL=0
+      shift
+      ;;
+    --local)
+      USE_S3=0
+      FORCE_LOCAL=1
+      shift
+      ;;
     --help)
       usage
       ;;
@@ -93,10 +107,39 @@ echo "🕒 Startzeit: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "====================================================================="
 log "INFO" "Starte vollständiges Backup..."
 
-# Prüfe und konfiguriere Backup-Systeme bei Bedarf
-if [[ $DO_IONOS -eq 1 || $DO_RESTIC -eq 1 ]]; then
-  # Konfigurationsfunktion direkt hier definieren für maximale Kompatibilität
-  function backup_configuration() {
+# S3-Konfiguration prüfen
+S3_CONFIG="/etc/website-engine/backup/restic.env"
+S3_STATUS=0
+
+if [[ $USE_S3 -eq 1 && ($DO_MYSQL -eq 1 || $DO_RESTIC -eq 1) ]]; then
+  if [[ -f "$S3_CONFIG" ]]; then
+    log "INFO" "Lade S3-Konfiguration aus $S3_CONFIG"
+    source "$S3_CONFIG"
+    
+    # Überprüfe, ob alle erforderlichen S3-Variablen gesetzt sind
+    if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || 
+          -z "${S3_BUCKET:-}" || -z "${RESTIC_PASSWORD:-}" ]]; then
+      log "WARNING" "S3-Konfiguration unvollständig"
+      S3_STATUS=1
+    else
+      log "INFO" "S3-Konfiguration geladen und gültig"
+      S3_STATUS=0
+      
+      # Exportiere Umgebungsvariablen für Skripte
+      export USE_S3 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+      export S3_BUCKET S3_ENDPOINT RESTIC_REPOSITORY RESTIC_PASSWORD
+    fi
+  else
+    log "WARNING" "S3-Konfigurationsdatei nicht gefunden: $S3_CONFIG"
+    S3_STATUS=1
+  fi
+  
+  # Bei Fehlern in der S3-Konfiguration und FORCE_LOCAL=0, Backup-Konfiguration starten
+  if [[ $S3_STATUS -eq 1 && $FORCE_LOCAL -eq 0 ]]; then
+    log "INFO" "Starte Backup-Konfiguration..."
+    
+    # Konfigurationsfunktion direkt hier definieren für maximale Kompatibilität
+    function backup_configuration() {
     local config_changed=0
 
     # IONOS-Konfiguration
@@ -250,7 +293,8 @@ EOL
   }
 
   # Backup-Konfiguration ausführen
-  backup_configuration
+    backup_configuration
+  fi
 fi
 
 # Status-Funktion für Backup-Fortschritt
@@ -357,15 +401,60 @@ if [[ $DO_RESTIC -eq 1 ]]; then
   echo "--------------------------------------------------------------------"
   RESTIC_STATUS=0
   
-  # Lade Restic-Umgebung
-  RESTIC_ENV_FILE="/etc/website-engine/backup/restic.env"
-  if [[ -f "$RESTIC_ENV_FILE" ]]; then
-    status_msg "INFO" "Lade Restic-Konfiguration aus $RESTIC_ENV_FILE"
-    source "$RESTIC_ENV_FILE"
+  # S3/Restic-Konfiguration laden oder lokale Konfiguration verwenden
+  if [[ $USE_S3 -eq 1 && $FORCE_LOCAL -eq 0 ]]; then
+    # Versuche die S3-Konfiguration zu laden
+    S3_CONFIG="/etc/website-engine/backup/restic.env"
+    
+    if [[ -f "$S3_CONFIG" ]]; then
+      status_msg "INFO" "Lade S3/Restic-Konfiguration aus $S3_CONFIG"
+      source "$S3_CONFIG"
+      
+      # Prüfe, ob URL-Format korrekt ist
+      if [[ "$RESTIC_REPOSITORY" == *"https://"* ]]; then
+        status_msg "WARNING" "Falsches Repository-Format: $RESTIC_REPOSITORY"
+        status_msg "INFO" "Korrigiere URL-Format (entferne https://)"
+        
+        # Korrigiere das Format
+        RESTIC_REPOSITORY=$(echo "$RESTIC_REPOSITORY" | sed 's|s3:https://|s3:|g')
+        echo "ℹ️ Korrigiertes Repository-Format: $RESTIC_REPOSITORY"
+      fi
+      
+      status_msg "INFO" "Verwende S3-Repository: $RESTIC_REPOSITORY"
+    else
+      status_msg "ERROR" "S3-Konfigurationsdatei nicht gefunden: $S3_CONFIG"
+      
+      if [[ $FORCE_LOCAL -eq 0 ]]; then
+        # Fallback zu lokalem Repository
+        status_msg "INFO" "Fallback zu lokalem Repository für dieses Backup"
+        
+        TEMP_RESTIC_DIR="/tmp/restic-backups"
+        mkdir -p "$TEMP_RESTIC_DIR"
+        chmod 700 "$TEMP_RESTIC_DIR"
+        
+        # Setze lokale Repository-Umgebung
+        export RESTIC_REPOSITORY="local:$TEMP_RESTIC_DIR"
+        export RESTIC_PASSWORD="temp-local-backup-password"
+        
+        status_msg "INFO" "Temporäres lokales Repository: $TEMP_RESTIC_DIR"
+      else
+        echo "❌ S3-Konfigurationsdatei nicht gefunden: $S3_CONFIG"
+        RESTIC_STATUS=1
+      fi
+    fi
   else
-    status_msg "ERROR" "Restic-Konfigurationsdatei nicht gefunden: $RESTIC_ENV_FILE"
-    echo "❌ Restic-Konfigurationsdatei nicht gefunden: $RESTIC_ENV_FILE"
-    RESTIC_STATUS=1
+    # Lokales Backup erzwungen oder S3 deaktiviert
+    status_msg "INFO" "Verwende lokales Repository (S3 deaktiviert oder --local Option)"
+    
+    TEMP_RESTIC_DIR="/tmp/restic-backups"
+    mkdir -p "$TEMP_RESTIC_DIR"
+    chmod 700 "$TEMP_RESTIC_DIR"
+    
+    # Setze lokale Repository-Umgebung
+    export RESTIC_REPOSITORY="local:$TEMP_RESTIC_DIR"
+    export RESTIC_PASSWORD="temp-local-backup-password"
+    
+    status_msg "INFO" "Lokales Repository: $TEMP_RESTIC_DIR"
   fi
   
   if [[ $RESTIC_STATUS -eq 0 ]]; then
@@ -404,9 +493,22 @@ if [[ $DO_RESTIC -eq 1 ]]; then
         fi
       else
         # Standardpfade sichern
-        status_msg "INFO" "Sichere Standardpfade: /etc, /var/www, /opt/website-engine, /etc/website-engine"
+        # Bestimme zu sichernde Verzeichnisse basierend auf Systemumgebung
+        BACKUP_PATHS=()
         
-        if ! restic backup /etc /var/www /opt/website-engine /etc/website-engine --tag "full" --tag "$(date +%F)"; then
+        # Prüfe, ob wir uns auf einem Produktions- oder Entwicklungssystem befinden
+        if [[ -d "/opt/website-engine" ]]; then
+          # Produktionssystem
+          BACKUP_PATHS+=("/etc" "/var/www" "/opt/website-engine" "/etc/website-engine")
+          status_msg "INFO" "Sichere Standardpfade für Produktionssystem: ${BACKUP_PATHS[*]}"
+        else
+          # Entwicklungs-/Testsystem - relativer Pfad im Repository
+          REPO_ROOT="$(dirname "$SCRIPT_DIR")"
+          BACKUP_PATHS+=("$REPO_ROOT")
+          status_msg "INFO" "Sichere Repository: $REPO_ROOT"
+        fi
+        
+        if ! restic backup "${BACKUP_PATHS[@]}" --tag "full" --tag "$(date +%F)"; then
           status_msg "ERROR" "Fehler beim Erstellen des Restic-Backups"
           RESTIC_STATUS=1
         else

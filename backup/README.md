@@ -36,15 +36,25 @@ IONOS_VOLUME_ID="deine-volume-id"
 IONOS_DATACENTER_ID="deine-datacenter-id"  # optional
 ```
 
-### Restic-Dateibackups
+### S3 und Restic-Dateibackups
 
 Datei: `/etc/website-engine/backup/restic.env`
 
 ```
-export RESTIC_REPOSITORY="s3:https://s3.beispiel.com/mein-bucket"
-export RESTIC_PASSWORD="ein-sicheres-passwort"
+# S3-Zugangsdaten
 export AWS_ACCESS_KEY_ID="dein-s3-access-key"
 export AWS_SECRET_ACCESS_KEY="dein-s3-secret-key"
+
+# S3-Konfiguration
+export S3_ENDPOINT="s3.eu-central-3.ionoscloud.com"
+export S3_BUCKET="website-backups"
+export S3_PATH_RESTIC="restic"
+export S3_PATH_MYSQL="mysql"
+
+# Restic-Konfiguration - WICHTIG: Die korrekte Syntax für S3 ist:
+# s3:s3.example.com/bucket-name/path (OHNE https://)
+export RESTIC_REPOSITORY="s3:s3.eu-central-3.ionoscloud.com/website-backups/restic"
+export RESTIC_PASSWORD="ein-sicheres-passwort"
 ```
 
 ## Sicherheit
@@ -77,15 +87,19 @@ Sie können jederzeit manuell ein Backup durchführen:
 
 ```bash
 # Alle Backup-Typen ausführen
-website-backup --all
+./backup-all.sh
 
 # Nur bestimmte Backup-Typen
-website-backup --mysql
-website-backup --ionos
-website-backup --restic
+./backup-all.sh --mysql
+./backup-all.sh --ionos
+./backup-all.sh --restic
+
+# S3-Speicherung erzwingen oder verhindern
+./backup-all.sh --s3     # Bevorzuge S3-Storage (Standard)
+./backup-all.sh --local  # Verwende nur lokale Speicherung
 
 # Nur eine bestimmte Site sichern
-website-backup --only-site=kunde1 --mysql --restic
+./backup-all.sh --only-site=kunde1 --mysql --restic
 ```
 
 ## Backup-Wiederherstellung
@@ -94,34 +108,34 @@ website-backup --only-site=kunde1 --mysql --restic
 
 1. Listen Sie verfügbare Backups auf:
    ```bash
-   website-restore --list-mysql
+   ./restore.sh --list-mysql
    ```
 
 2. Stellen Sie ein Backup wieder her:
    ```bash
-   website-restore --mysql /var/backups/mysql/backup-2023-05-15.sql.gz
+   ./restore.sh --mysql /var/backups/mysql/backup-2023-05-15.sql.gz
    ```
 
 3. Stellen Sie nur eine Site wieder her:
    ```bash
-   website-restore --mysql /var/backups/mysql/backup-2023-05-15.sql.gz --only-site=kunde1
+   ./restore.sh --mysql /var/backups/mysql/backup-2023-05-15.sql.gz --only-site=kunde1
    ```
 
 ### Restic-Wiederherstellung
 
 1. Listen Sie verfügbare Snapshots auf:
    ```bash
-   website-restore --list-restic
+   ./restore.sh --list-restic
    ```
 
 2. Stellen Sie einen Snapshot wieder her:
    ```bash
-   website-restore --restic latest --target /tmp/restore
+   ./restore.sh --restic latest --target /tmp/restore
    ```
 
 3. Stellen Sie nur eine Site wieder her:
    ```bash
-   website-restore --restic latest --only-site=kunde1
+   ./restore.sh --restic latest --only-site=kunde1
    ```
 
 ## IONOS-Snapshots
@@ -131,7 +145,7 @@ IONOS-Snapshots werden über das IONOS Cloud Panel verwaltet. Sie können Snapsh
 Ein manueller Snapshot kann erstellt werden mit:
 
 ```bash
-/opt/website-engine/backup/ionos-snapshot.sh
+./ionos-snapshot.sh
 ```
 
 ## Best Practices
@@ -162,6 +176,15 @@ Ein manueller Snapshot kann erstellt werden mit:
 
 - **Problem**: Repository-Zugriffsfehler
   - **Lösung**: Überprüfen Sie S3-Zugangsdaten und Netzwerkverbindung
+
+- **Problem**: `Fatal: invalid backend` Fehler
+  - **Lösung**: Korrigieren Sie die Repository-URL. Entfernen Sie `https://` aus der URL:
+    ```
+    # Falsch:
+    export RESTIC_REPOSITORY="s3:https://s3.example.com/bucket/path"
+    # Richtig:
+    export RESTIC_REPOSITORY="s3:s3.example.com/bucket/path"
+    ```
 
 - **Problem**: Repository ist gesperrt
   - **Lösung**: Führen Sie aus: `restic unlock`
