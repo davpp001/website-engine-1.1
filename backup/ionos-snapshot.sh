@@ -54,29 +54,69 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Lade Konfiguration
-if [[ -f "$CONFIG_FILE" ]]; then
+if [[ -f "$CONFIG_FILE" ]] && [[ -s "$CONFIG_FILE" ]]; then
   log "INFO" "Lade IONOS-Konfiguration aus $CONFIG_FILE"
   source "$CONFIG_FILE"
-else
-  log "WARNING" "IONOS-Konfigurationsdatei $CONFIG_FILE nicht gefunden."
-  log "WARNING" "Versuche die Konfiguration interaktiv zu erstellen..."
   
-  # Prüfe, ob die Konfigurationsfunktion verfügbar ist
-  if type configure_backup_systems &>/dev/null; then
-    configure_backup_systems
-    
-    # Nach der Konfiguration erneut versuchen, die Datei zu laden
-    if [[ -f "$CONFIG_FILE" ]]; then
-      log "INFO" "Lade neu erstellte IONOS-Konfiguration aus $CONFIG_FILE"
-      source "$CONFIG_FILE"
-    else
-      log "WARNING" "Konfigurationsdatei konnte nicht erstellt werden."
-      log "WARNING" "Verwende Umgebungsvariablen, falls vorhanden."
-    fi
-  else
-    log "WARNING" "Konfigurationsfunktion nicht verfügbar."
-    log "WARNING" "Verwende Umgebungsvariablen, falls vorhanden."
+  # Zusätzliche Prüfung ob die essentiellen Variablen gesetzt sind
+  if [[ -z "${IONOS_TOKEN:-}" || -z "${IONOS_SERVER_ID:-}" || -z "${IONOS_VOLUME_ID:-}" ]]; then
+    log "WARNING" "IONOS-Konfiguration unvollständig. Starte Konfigurationsassistenten..."
+    NEED_CONFIG=1
   fi
+else
+  log "WARNING" "IONOS-Konfigurationsdatei $CONFIG_FILE nicht gefunden oder leer."
+  log "INFO" "Starte Konfigurationsassistenten..."
+  NEED_CONFIG=1
+fi
+
+# Konfigurationsassistent bei Bedarf
+if [[ "${NEED_CONFIG:-0}" -eq 1 ]]; then
+  echo
+  echo "==============================================================="
+  echo "🌩️  IONOS Cloud Snapshot-Konfiguration"
+  echo "==============================================================="
+  echo "Für Server-Snapshots benötigen wir eine Verbindung zu IONOS Cloud."
+  echo "Bitte halten Sie folgende Informationen bereit:"
+  echo "  - IONOS API-Token (aus Ihrem IONOS Cloud Panel)"
+  echo "  - Server-ID und Volume-ID Ihres IONOS Cloud-Servers"
+  echo
+
+  # IONOS-Token abfragen
+  IONOS_TOKEN=${IONOS_TOKEN:-""}
+  read -p "IONOS API-Token: " IONOS_TOKEN
+  
+  # Server-ID abfragen
+  IONOS_SERVER_ID=${IONOS_SERVER_ID:-""}
+  read -p "IONOS Server-ID: " IONOS_SERVER_ID
+  
+  # Volume-ID abfragen
+  IONOS_VOLUME_ID=${IONOS_VOLUME_ID:-""}
+  read -p "IONOS Volume-ID: " IONOS_VOLUME_ID
+
+  # Optional: Datacenter-ID abfragen
+  IONOS_DATACENTER_ID=${IONOS_DATACENTER_ID:-""}
+  read -p "IONOS Datacenter-ID (optional, Enter für Standard): " IONOS_DATACENTER_ID
+  
+  # Konfigurationsdatei erstellen
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  cat > "$CONFIG_FILE" << EOL
+# IONOS Cloud API Konfiguration
+# Automatisch konfiguriert am $(date +%Y-%m-%d)
+
+# Erforderliche Konfiguration
+IONOS_TOKEN="$IONOS_TOKEN"
+IONOS_SERVER_ID="$IONOS_SERVER_ID"
+IONOS_VOLUME_ID="$IONOS_VOLUME_ID"
+
+# Optionale Konfiguration
+IONOS_DATACENTER_ID="$IONOS_DATACENTER_ID"
+IONOS_API_VERSION="v6"
+EOL
+
+  # Berechtigungen setzen
+  chmod 600 "$CONFIG_FILE"
+  log "SUCCESS" "IONOS-Konfiguration gespeichert in $CONFIG_FILE"
+  echo "✅ IONOS-Konfiguration gespeichert."
 fi
 
 # Prüfe notwendige Umgebungsvariablen

@@ -95,12 +95,162 @@ log "INFO" "Starte vollständiges Backup..."
 
 # Prüfe und konfiguriere Backup-Systeme bei Bedarf
 if [[ $DO_IONOS -eq 1 || $DO_RESTIC -eq 1 ]]; then
-  # Nur wenn IONOS oder Restic Backups geplant sind
-  if type configure_backup_systems &>/dev/null; then
-    configure_backup_systems
-  else
-    log "WARNING" "Funktion configure_backup_systems nicht gefunden. Möglicherweise wird eine ältere Version von config.sh verwendet."
-  fi
+  # Konfigurationsfunktion direkt hier definieren für maximale Kompatibilität
+  function backup_configuration() {
+    local config_changed=0
+
+    # IONOS-Konfiguration
+    local ionos_config="/etc/website-engine/backup/ionos.env"
+    local should_configure_ionos=0
+
+    if [[ ! -f "$ionos_config" ]]; then
+      should_configure_ionos=1
+    elif [[ ! -s "$ionos_config" ]]; then
+      should_configure_ionos=1
+    else
+      # Prüfe, ob wichtige Einstellungen vorhanden sind
+      source "$ionos_config" 2>/dev/null || true
+      if [[ -z "${IONOS_TOKEN:-}" || -z "${IONOS_SERVER_ID:-}" || -z "${IONOS_VOLUME_ID:-}" ]]; then
+        should_configure_ionos=1
+      fi
+    fi
+
+    if [[ $should_configure_ionos -eq 1 ]]; then
+      echo
+      echo "==============================================================="
+      echo "🌩️  IONOS Cloud Snapshot-Konfiguration"
+      echo "==============================================================="
+      echo "Für Server-Snapshots benötigen wir eine Verbindung zu IONOS Cloud."
+      echo "Bitte halten Sie folgende Informationen bereit:"
+      echo "  - IONOS API-Token (aus Ihrem IONOS Cloud Panel)"
+      echo "  - Server-ID und Volume-ID Ihres IONOS Cloud-Servers"
+      echo
+
+      # IONOS-Token abfragen
+      local ionos_token=""
+      read -p "IONOS API-Token: " ionos_token
+      
+      # Server-ID abfragen
+      local ionos_server_id=""
+      read -p "IONOS Server-ID: " ionos_server_id
+      
+      # Volume-ID abfragen
+      local ionos_volume_id=""
+      read -p "IONOS Volume-ID: " ionos_volume_id
+
+      # Optional: Datacenter-ID abfragen
+      local ionos_datacenter_id=""
+      read -p "IONOS Datacenter-ID (optional, Enter für Standard): " ionos_datacenter_id
+      
+      # Konfigurationsdatei erstellen
+      mkdir -p "$(dirname "$ionos_config")"
+      cat > "$ionos_config" << EOL
+# IONOS Cloud API Konfiguration
+# Automatisch konfiguriert am $(date +%Y-%m-%d)
+
+# Erforderliche Konfiguration
+IONOS_TOKEN="$ionos_token"
+IONOS_SERVER_ID="$ionos_server_id"
+IONOS_VOLUME_ID="$ionos_volume_id"
+
+# Optionale Konfiguration
+IONOS_DATACENTER_ID="$ionos_datacenter_id"
+IONOS_API_VERSION="v6"
+EOL
+
+      # Berechtigungen setzen
+      chmod 600 "$ionos_config"
+      log "SUCCESS" "IONOS-Konfiguration gespeichert in $ionos_config"
+      echo "✅ IONOS-Konfiguration gespeichert."
+      config_changed=1
+    else
+      log "INFO" "IONOS-Konfiguration existiert bereits und scheint gültig zu sein"
+    fi
+
+    # Restic-Konfiguration
+    local restic_config="/etc/website-engine/backup/restic.env"
+    local should_configure_restic=0
+
+    if [[ ! -f "$restic_config" ]]; then
+      should_configure_restic=1
+    elif [[ ! -s "$restic_config" ]]; then
+      should_configure_restic=1
+    else
+      # Prüfe, ob wichtige Einstellungen vorhanden sind
+      source "$restic_config" 2>/dev/null || true
+      if [[ -z "${RESTIC_REPOSITORY:-}" || -z "${RESTIC_PASSWORD:-}" ]]; then
+        should_configure_restic=1
+      fi
+    fi
+
+    if [[ $should_configure_restic -eq 1 ]]; then
+      echo
+      echo "==============================================================="
+      echo "📦 Restic Backup-Konfiguration"
+      echo "==============================================================="
+      echo "Für verschlüsselte Datei-Backups benötigen wir eine Restic-Konfiguration."
+      echo "Bitte halten Sie folgende Informationen bereit:"
+      echo "  - S3-Repository-URL (z.B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups)"
+      echo "  - Ein sicheres Repository-Passwort"
+      echo "  - S3 Access Key und Secret Key"
+      echo
+
+      # Repository-URL abfragen
+      local restic_repo=""
+      read -p "S3-Repository-URL: " restic_repo
+      
+      # Repository-Passwort abfragen oder generieren
+      local restic_pwd=""
+      read -p "Repository-Passwort (Enter für automatische Generierung): " restic_pwd
+      if [[ -z "$restic_pwd" ]]; then
+        # Einfache Passwortgenerierung
+        restic_pwd=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+        echo "Generiertes Passwort: $restic_pwd"
+        echo "⚠️ WICHTIG: Speichern Sie dieses Passwort sicher ab!"
+      fi
+      
+      # S3 Credentials abfragen
+      local aws_access_key=""
+      read -p "S3 Access Key ID: " aws_access_key
+      
+      local aws_secret_key=""
+      read -p "S3 Secret Access Key: " aws_secret_key
+
+      # Konfigurationsdatei erstellen
+      mkdir -p "$(dirname "$restic_config")"
+      cat > "$restic_config" << EOL
+# Restic-Konfiguration
+# Automatisch konfiguriert am $(date +%Y-%m-%d)
+export RESTIC_REPOSITORY="$restic_repo"
+export RESTIC_PASSWORD="$restic_pwd"
+export AWS_ACCESS_KEY_ID="$aws_access_key"
+export AWS_SECRET_ACCESS_KEY="$aws_secret_key"
+EOL
+
+      # Berechtigungen setzen
+      chmod 600 "$restic_config"
+      log "SUCCESS" "Restic-Konfiguration gespeichert in $restic_config"
+      echo "✅ Restic-Konfiguration gespeichert."
+      config_changed=1
+    else
+      log "INFO" "Restic-Konfiguration existiert bereits und scheint gültig zu sein"
+    fi
+
+    # Wenn Konfiguration geändert wurde, Status melden
+    if [[ $config_changed -eq 1 ]]; then
+      echo
+      echo "==============================================================="
+      echo "✅ Backup-Konfiguration abgeschlossen"
+      echo "==============================================================="
+      echo "Die Backup-Systeme wurden konfiguriert."
+      echo
+    fi
+
+    return 0
+  }
+
+  # Backup-Konfiguration ausführen
+  backup_configuration
 fi
 
 # Status-Funktion für Backup-Fortschritt
