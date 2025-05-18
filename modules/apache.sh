@@ -73,7 +73,7 @@ function check_ssl_cert() {
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
     log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    if sudo certbot --apache -d "$DOMAIN_TO_CHECK" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+    if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
       log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
@@ -113,7 +113,7 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        if sudo certbot --apache -d "$DOMAIN_TO_CHECK" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+        if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
           log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
@@ -176,8 +176,9 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Versuche ein neues Zertifikat zu erstellen
-      if sudo certbot --apache -d "$FQDN" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+      # Versuche ein neues Zertifikat zu erstellen ohne Apache-Integration
+      # Erst nur das Zertifikat erstellen mit webroot oder standalone
+      if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
         # Aktualisiere Zertifikatspfade nach erfolgreicher Erstellung
         CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
         KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
