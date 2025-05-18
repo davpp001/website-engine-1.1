@@ -44,17 +44,39 @@ function check_ssl_cert() {
 }
 
 # Vhost-Konfiguration erstellen
-# Usage: create_vhost_config <subdomain-name>
+# Usage: create_vhost_config <subdomain-name> [ssl-cert-path] [ssl-key-path]
 function create_vhost_config() {
   local SUB="$1"
   local FQDN="${SUB}.${DOMAIN}"
   local DOCROOT="${WP_DIR}/${SUB}"
   local VHOST_CONFIG="${APACHE_SITES_DIR}/${SUB}.conf"
+  local CUSTOM_SSL_CERT="${2:-}"
+  local CUSTOM_SSL_KEY="${3:-}"
   
   log "INFO" "Erstelle Apache vHost-Konfiguration für $FQDN in $VHOST_CONFIG"
   
-  # Stelle sicher, dass SSL-Zertifikat existiert
-  check_ssl_cert || return 1
+  # Bestimme, welche SSL-Zertifikate verwendet werden sollen
+  local CERT_PATH="$SSL_CERT_PATH"
+  local KEY_PATH="$SSL_KEY_PATH"
+  
+  if [[ -n "$CUSTOM_SSL_CERT" && -f "$CUSTOM_SSL_CERT" ]]; then
+    log "INFO" "Verwende benutzerdefiniertes SSL-Zertifikat: $CUSTOM_SSL_CERT"
+    CERT_PATH="$CUSTOM_SSL_CERT"
+    KEY_PATH="$CUSTOM_SSL_KEY"
+  else
+    # Stelle sicher, dass SSL-Zertifikat existiert
+    if ! check_ssl_cert; then
+      log "WARNING" "SSL-Zertifikat fehlt oder abgelaufen. Erstelle spezifisches Zertifikat für $FQDN"
+      if ! sudo certbot --apache -d "$FQDN" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+        log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird ohne SSL konfiguriert."
+      else
+        # Aktualisiere Zertifikatspfade
+        CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
+        KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
+        log "SUCCESS" "SSL-Zertifikat für $FQDN erstellt"
+      fi
+    fi
+  fi
   
   # Erzeuge vHost-Konfiguration
   sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
@@ -86,8 +108,8 @@ function create_vhost_config() {
   
   # SSL-Konfiguration
   SSLEngine on
-  SSLCertificateFile ${SSL_CERT_PATH}
-  SSLCertificateKeyFile ${SSL_KEY_PATH}
+  SSLCertificateFile ${CERT_PATH}
+  SSLCertificateKeyFile ${KEY_PATH}
   
   # SSL-Sicherheitseinstellungen
   SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
@@ -189,10 +211,31 @@ function setup_vhost() {
     return 1
   }
   
-  # 3. Erstelle vHost-Konfiguration
-  create_vhost_config "$SUB" || {
-    log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
-    return 1
+  # 3. Prüfe auf ein domainspezifisches SSL-Zertifikat
+  local SUB_SSL_CERT=""
+  local SUB_SSL_KEY=""
+  local SUB_SSL_DIR="/etc/letsencrypt/live/${FQDN}"
+  
+  if [[ -d "$SUB_SSL_DIR" && -f "${SUB_SSL_DIR}/fullchain.pem" ]]; then
+    log "INFO" "Spezifisches SSL-Zertifikat für $FQDN gefunden"
+    SUB_SSL_CERT="${SUB_SSL_DIR}/fullchain.pem"
+    SUB_SSL_KEY="${SUB_SSL_DIR}/privkey.pem"
+  fi
+  
+  # 4. Erstelle vHost-Konfiguration
+  if [[ -n "$SUB_SSL_CERT" ]]; then
+    # Verwende domainspezifisches Zertifikat
+    log "INFO" "Verwende spezifisches SSL-Zertifikat für $FQDN"
+    create_vhost_config "$SUB" "$SUB_SSL_CERT" "$SUB_SSL_KEY" || {
+      log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
+      return 1
+    }
+  else
+    # Verwende Standardzertifikat oder erstelle ein neues
+    create_vhost_config "$SUB" || {
+      log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
+      return 1
+    }
   }
   
   # 4. Aktiviere vHost
