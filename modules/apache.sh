@@ -9,38 +9,145 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
-# SSL-Zertifikat prüfen
-# Usage: check_ssl_cert
+# SSL-Zertifikat verwalten
+# Usage: check_ssl_cert [domain]
 function check_ssl_cert() {
-  if [[ ! -f "$SSL_CERT_PATH" ]]; then
-    log "ERROR" "SSL-Zertifikat nicht gefunden: $SSL_CERT_PATH"
-    log "ERROR" "Bitte erstelle ein SSL-Zertifikat mit: certbot certonly --dns-cloudflare -d *.$DOMAIN"
-    return 1
+  local DOMAIN_TO_CHECK="${1:-$DOMAIN}"
+  local IS_SUBDOMAIN=0
+  local WILDCARD_CERT_PATH="$SSL_CERT_PATH"
+  local SPECIFIC_CERT_PATH=""
+  
+  # Wenn wir eine Subdomain prüfen, setze IS_SUBDOMAIN
+  if [[ "$DOMAIN_TO_CHECK" == *"."* && "$DOMAIN_TO_CHECK" != "$DOMAIN" ]]; then
+    IS_SUBDOMAIN=1
+    # Prüfe, ob ein eigenes Zertifikat existiert
+    if [[ -d "/etc/letsencrypt/live/$DOMAIN_TO_CHECK" ]]; then
+      SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
+      log "INFO" "Spezifisches Zertifikat für $DOMAIN_TO_CHECK gefunden"
+    fi
   fi
   
-  log "INFO" "SSL-Zertifikat gefunden: $SSL_CERT_PATH"
+  # Wenn ein spezifisches Zertifikat existiert, verwende dieses
+  if [[ $IS_SUBDOMAIN -eq 1 && -n "$SPECIFIC_CERT_PATH" && -f "$SPECIFIC_CERT_PATH" ]]; then
+    log "INFO" "Verwende spezifisches SSL-Zertifikat: $SPECIFIC_CERT_PATH"
+    return 0
+  fi
   
-  # Prüfe Ablaufdatum
-  local cert_end_date=$(openssl x509 -in "$SSL_CERT_PATH" -noout -enddate 2>/dev/null | cut -d= -f2)
-  if [[ -n "$cert_end_date" ]]; then
-    local cert_end_epoch=$(date -d "$cert_end_date" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$cert_end_date" +%s 2>/dev/null)
-    local now_epoch=$(date +%s)
-    local days_left=$(( (cert_end_epoch - now_epoch) / 86400 ))
-    
-    if [[ $days_left -lt 0 ]]; then
-      log "ERROR" "SSL-Zertifikat ist abgelaufen!"
-      return 1
-    elif [[ $days_left -lt 15 ]]; then
-      log "WARNING" "SSL-Zertifikat läuft in $days_left Tagen ab! Baldige Erneuerung empfohlen."
+  # Prüfe auf Wildcard-Zertifikat
+  local HAS_WILDCARD=0
+  if [[ -f "$WILDCARD_CERT_PATH" ]]; then
+    # Überprüfe, ob es sich um ein Wildcard-Zertifikat handelt
+    if openssl x509 -in "$WILDCARD_CERT_PATH" -text | grep -q "DNS:\*\.$DOMAIN"; then
+      log "INFO" "Wildcard-Zertifikat gefunden für *.$DOMAIN"
+      HAS_WILDCARD=1
     else
-      log "INFO" "SSL-Zertifikat ist gültig für weitere $days_left Tage"
+      log "WARNING" "Zertifikat existiert, ist aber kein Wildcard-Zertifikat"
+    fi
+    
+    # Prüfe Ablaufdatum
+    local cert_end_date=$(openssl x509 -in "$WILDCARD_CERT_PATH" -noout -enddate 2>/dev/null | cut -d= -f2)
+    if [[ -n "$cert_end_date" ]]; then
+      local cert_end_epoch=$(date -d "$cert_end_date" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$cert_end_date" +%s 2>/dev/null)
+      local now_epoch=$(date +%s)
+      local days_left=$(( (cert_end_epoch - now_epoch) / 86400 ))
+      
+      if [[ $days_left -lt 0 ]]; then
+        log "ERROR" "SSL-Zertifikat ist abgelaufen!"
+        HAS_WILDCARD=0
+      elif [[ $days_left -lt 15 ]]; then
+        log "WARNING" "SSL-Zertifikat läuft in $days_left Tagen ab! Baldige Erneuerung empfohlen."
+      else
+        log "INFO" "SSL-Zertifikat ist gültig für weitere $days_left Tage"
+      fi
+    else
+      log "ERROR" "SSL-Zertifikat konnte nicht überprüft werden"
+      HAS_WILDCARD=0
     fi
   else
-    log "ERROR" "SSL-Zertifikat konnte nicht überprüft werden"
-    return 1
+    log "ERROR" "SSL-Zertifikat nicht gefunden: $WILDCARD_CERT_PATH"
+    HAS_WILDCARD=0
   fi
   
-  return 0
+  # Wenn wir eine Subdomain prüfen und kein Wildcard-Zertifikat haben, erstelle ein eigenes
+  if [[ $IS_SUBDOMAIN -eq 1 && $HAS_WILDCARD -eq 0 ]]; then
+    log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
+    log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
+    
+    if sudo certbot --apache -d "$DOMAIN_TO_CHECK" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+      log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
+      SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
+      return 0
+    else
+      log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
+      return 1
+    fi
+  fi
+  
+  # Rückgabewert basierend auf Wildcard-Status
+  return $(( 1 - HAS_WILDCARD ))
+}
+
+# SSL-Zertifikatspfade ermitteln
+# Usage: get_ssl_cert_paths <domain> [out_cert_var] [out_key_var]
+function get_ssl_cert_paths() {
+  local DOMAIN_TO_CHECK="$1"
+  local OUT_CERT_VAR="${2:-}"
+  local OUT_KEY_VAR="${3:-}"
+  local CERT_PATH=""
+  local KEY_PATH=""
+  
+  # Prüfe auf domainspezifisches Zertifikat
+  if [[ -d "/etc/letsencrypt/live/$DOMAIN_TO_CHECK" ]]; then
+    CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
+    KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
+    log "INFO" "Verwende spezifisches Zertifikat für $DOMAIN_TO_CHECK"
+  else
+    # Prüfe, ob DOMAIN_TO_CHECK eine Subdomain ist
+    if [[ "$DOMAIN_TO_CHECK" == *".$DOMAIN" ]]; then
+      # Prüfe auf Wildcard-Zertifikat
+      if openssl x509 -in "$SSL_CERT_PATH" -text 2>/dev/null | grep -q "DNS:\*\.$DOMAIN"; then
+        CERT_PATH="$SSL_CERT_PATH"
+        KEY_PATH="$SSL_KEY_PATH"
+        log "INFO" "Verwende Wildcard-Zertifikat für $DOMAIN_TO_CHECK"
+      else
+        log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
+        log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
+        
+        if sudo certbot --apache -d "$DOMAIN_TO_CHECK" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+          CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
+          KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
+          log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
+        else
+          log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
+          # Verwende Standardzertifikat als Fallback (wird wahrscheinlich Fehler verursachen)
+          CERT_PATH="$SSL_CERT_PATH"
+          KEY_PATH="$SSL_KEY_PATH"
+        fi
+      fi
+    else
+      # Hauptdomain
+      CERT_PATH="$SSL_CERT_PATH"
+      KEY_PATH="$SSL_KEY_PATH"
+      log "INFO" "Verwende Hauptdomain-Zertifikat für $DOMAIN_TO_CHECK"
+    fi
+  fi
+  
+  # Ausgabe setzen, wenn Variablennamen angegeben wurden
+  if [[ -n "$OUT_CERT_VAR" ]]; then
+    eval "$OUT_CERT_VAR=\"$CERT_PATH\""
+  fi
+  
+  if [[ -n "$OUT_KEY_VAR" ]]; then
+    eval "$OUT_KEY_VAR=\"$KEY_PATH\""
+  fi
+  
+  # Prüfen, ob beide Pfade existieren
+  if [[ -f "$CERT_PATH" && -f "$KEY_PATH" ]]; then
+    return 0
+  else
+    log "ERROR" "SSL-Zertifikatsdateien nicht gefunden: $CERT_PATH oder $KEY_PATH"
+    return 1
+  fi
 }
 
 # Vhost-Konfiguration erstellen
@@ -56,24 +163,29 @@ function create_vhost_config() {
   log "INFO" "Erstelle Apache vHost-Konfiguration für $FQDN in $VHOST_CONFIG"
   
   # Bestimme, welche SSL-Zertifikate verwendet werden sollen
-  local CERT_PATH="$SSL_CERT_PATH"
-  local KEY_PATH="$SSL_KEY_PATH"
+  local CERT_PATH=""
+  local KEY_PATH=""
   
   if [[ -n "$CUSTOM_SSL_CERT" && -f "$CUSTOM_SSL_CERT" ]]; then
+    # Verwende die übergebenen benutzerdefinierten Zertifikatspfade
     log "INFO" "Verwende benutzerdefiniertes SSL-Zertifikat: $CUSTOM_SSL_CERT"
     CERT_PATH="$CUSTOM_SSL_CERT"
     KEY_PATH="$CUSTOM_SSL_KEY"
   else
-    # Stelle sicher, dass SSL-Zertifikat existiert
-    if ! check_ssl_cert; then
-      log "WARNING" "SSL-Zertifikat fehlt oder abgelaufen. Erstelle spezifisches Zertifikat für $FQDN"
-      if ! sudo certbot --apache -d "$FQDN" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
-        log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird ohne SSL konfiguriert."
-      else
-        # Aktualisiere Zertifikatspfade
+    # Nutze die neue Funktion, um die besten Zertifikatspfade zu ermitteln
+    if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
+      log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
+      
+      # Versuche ein neues Zertifikat zu erstellen
+      if sudo certbot --apache -d "$FQDN" --non-interactive --agree-tos --email "$SSL_EMAIL"; then
+        # Aktualisiere Zertifikatspfade nach erfolgreicher Erstellung
         CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
         KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
-        log "SUCCESS" "SSL-Zertifikat für $FQDN erstellt"
+        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt"
+      else
+        log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird mit Standard-Zertifikat konfiguriert."
+        CERT_PATH="$SSL_CERT_PATH"
+        KEY_PATH="$SSL_KEY_PATH"
       fi
     fi
   fi
@@ -211,32 +323,12 @@ function setup_vhost() {
     return 1
   }
   
-  # 3. Prüfe auf ein domainspezifisches SSL-Zertifikat
-  local SUB_SSL_CERT=""
-  local SUB_SSL_KEY=""
-  local SUB_SSL_DIR="/etc/letsencrypt/live/${FQDN}"
-  
-  if [[ -d "$SUB_SSL_DIR" && -f "${SUB_SSL_DIR}/fullchain.pem" ]]; then
-    log "INFO" "Spezifisches SSL-Zertifikat für $FQDN gefunden"
-    SUB_SSL_CERT="${SUB_SSL_DIR}/fullchain.pem"
-    SUB_SSL_KEY="${SUB_SSL_DIR}/privkey.pem"
-  fi
-  
-  # 4. Erstelle vHost-Konfiguration
-  if [[ -n "$SUB_SSL_CERT" ]]; then
-    # Verwende domainspezifisches Zertifikat
-    log "INFO" "Verwende spezifisches SSL-Zertifikat für $FQDN"
-    create_vhost_config "$SUB" "$SUB_SSL_CERT" "$SUB_SSL_KEY" || {
-      log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
-      return 1
-    }
-  else
-    # Verwende Standardzertifikat oder erstelle ein neues
-    create_vhost_config "$SUB" || {
-      log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
-      return 1
-    }
-  fi
+  # 3. Erstelle vHost-Konfiguration mit intelligenter SSL-Verwaltung
+  # Die Funktion create_vhost_config kümmert sich jetzt automatisch um die besten Zertifikate
+  create_vhost_config "$SUB" || {
+    log "ERROR" "Konnte vHost-Konfiguration nicht erstellen"
+    return 1
+  }
   
   # 4. Aktiviere vHost
   enable_vhost "$SUB" || {
