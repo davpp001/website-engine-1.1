@@ -73,8 +73,8 @@ function check_ssl_cert() {
     log "WARNING" "Kein gültiges Wildcard-Zertifikat gefunden für $DOMAIN_TO_CHECK"
     log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
     
-    if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
-      log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
+    if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+      log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt und Apache konfiguriert"
       SPECIFIC_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
       return 0
     else
@@ -113,10 +113,10 @@ function get_ssl_cert_paths() {
         log "WARNING" "Kein passendes Zertifikat gefunden für $DOMAIN_TO_CHECK"
         log "INFO" "Erstelle ein eigenes Zertifikat für $DOMAIN_TO_CHECK"
         
-        if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
+        if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$DOMAIN_TO_CHECK"; then
           CERT_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/fullchain.pem"
           KEY_PATH="/etc/letsencrypt/live/$DOMAIN_TO_CHECK/privkey.pem"
-          log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt"
+          log "SUCCESS" "SSL-Zertifikat für $DOMAIN_TO_CHECK erfolgreich erstellt und Apache konfiguriert"
         else
           log "ERROR" "Konnte kein SSL-Zertifikat für $DOMAIN_TO_CHECK erstellen"
           # Verwende Standardzertifikat als Fallback (wird wahrscheinlich Fehler verursachen)
@@ -176,13 +176,13 @@ function create_vhost_config() {
     if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
       log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Erstelle spezifisches Zertifikat."
       
-      # Versuche ein neues Zertifikat zu erstellen ohne Apache-Integration
-      # Erst nur das Zertifikat erstellen mit webroot oder standalone
-      if sudo certbot certonly --standalone --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
+      # Direkt mit Apache-Integration erstellen
+      # Das löst beide Probleme: Zertifikat erstellen UND Apache richtig konfigurieren
+      if sudo certbot --apache --non-interactive --agree-tos --email "$SSL_EMAIL" -d "$FQDN"; then
         # Aktualisiere Zertifikatspfade nach erfolgreicher Erstellung
         CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
         KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
-        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt"
+        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt und Apache konfiguriert"
       else
         log "ERROR" "Konnte kein SSL-Zertifikat erstellen. VHost wird mit Standard-Zertifikat konfiguriert."
         CERT_PATH="$SSL_CERT_PATH"
@@ -406,6 +406,28 @@ function setup_vhost() {
     log "ERROR" "Konnte Berechtigungen für Documentroot nicht setzen"
     return 1
   }
+  
+  # 3. Prüfe, ob die Subdomain im DNS existiert, bevor wir das SSL-Zertifikat erstellen
+  local max_dns_checks=3
+  local dns_check_count=0
+  local dns_success=0
+  
+  while [[ $dns_check_count -lt $max_dns_checks && $dns_success -eq 0 ]]; do
+    dns_check_count=$((dns_check_count+1))
+    
+    if dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
+      log "INFO" "DNS-Eintrag für ${SUB}.${DOMAIN} gefunden. Fahre fort."
+      dns_success=1
+    else
+      log "WARNING" "DNS-Eintrag für ${SUB}.${DOMAIN} noch nicht gefunden. Warte kurz..."
+      sleep 10
+    fi
+  done
+  
+  # Selbst wenn DNS noch nicht propagiert ist, fahren wir fort, aber geben eine Warnung aus
+  if [[ $dns_success -eq 0 ]]; then
+    log "WARNING" "DNS-Eintrag für ${SUB}.${DOMAIN} konnte nicht verifiziert werden. Dies könnte Probleme bei der SSL-Zertifikatserstellung verursachen."
+  fi
   
   # 3. Erstelle vHost-Konfiguration mit intelligenter SSL-Verwaltung
   # Die Funktion create_vhost_config kümmert sich jetzt automatisch um die besten Zertifikate
