@@ -416,7 +416,14 @@ if [[ $DO_RESTIC -eq 1 ]]; then
         status_msg "INFO" "Korrigiere URL-Format (entferne https://)"
         
         # Korrigiere das Format
-        RESTIC_REPOSITORY=$(echo "$RESTIC_REPOSITORY" | sed 's|s3:https://|s3:|g')
+        RESTIC_REPOSITORY=$(echo "$RESTIC_REPOSITORY" | sed 's|https://||g')
+        echo "ℹ️ Korrigiertes Repository-Format: $RESTIC_REPOSITORY"
+      fi
+      
+      # Stelle sicher, dass s3: Präfix vorhanden ist
+      if [[ "$RESTIC_REPOSITORY" != s3:* ]]; then
+        status_msg "WARNING" "Repository-Format fehlt s3: Präfix"
+        RESTIC_REPOSITORY="s3:$RESTIC_REPOSITORY"
         echo "ℹ️ Korrigiertes Repository-Format: $RESTIC_REPOSITORY"
       fi
       
@@ -498,8 +505,19 @@ if [[ $DO_RESTIC -eq 1 ]]; then
         
         # Prüfe, ob wir uns auf einem Produktions- oder Entwicklungssystem befinden
         if [[ -d "/opt/website-engine" ]]; then
-          # Produktionssystem
-          BACKUP_PATHS+=("/etc" "/var/www" "/opt/website-engine" "/etc/website-engine")
+          # Produktionssystem - prüfe auf tatsächliche Existenz der Standardpfade
+          PROD_PATHS=("/etc" "/var/www" "/opt/website-engine" "/etc/website-engine")
+          for path in "${PROD_PATHS[@]}"; do
+            if [[ -d "$path" ]]; then
+              BACKUP_PATHS+=("$path")
+            fi
+          done
+          
+          # Wenn keine Pfade gefunden wurden, verwende aktuelle Verzeichnisse
+          if [[ ${#BACKUP_PATHS[@]} -eq 0 ]]; then
+            BACKUP_PATHS+=("$SCRIPT_DIR" "/etc/passwd" "/etc/hostname")
+          fi
+          
           status_msg "INFO" "Sichere Standardpfade für Produktionssystem: ${BACKUP_PATHS[*]}"
         else
           # Entwicklungs-/Testsystem - relativer Pfad im Repository
@@ -542,6 +560,11 @@ echo
 echo "====================================================================="
 echo "🏁 BACKUP ABGESCHLOSSEN"
 echo "🕒 Endzeit: $(date '+%Y-%m-%d %H:%M:%S')"
+
+# Initialisiere Status-Variablen falls nicht gesetzt
+: ${MYSQL_STATUS:=0}
+: ${IONOS_STATUS:=0}
+: ${RESTIC_STATUS:=0}
 
 # Gesamtstatus ermitteln
 TOTAL_STATUS=$((MYSQL_STATUS + IONOS_STATUS + RESTIC_STATUS))
