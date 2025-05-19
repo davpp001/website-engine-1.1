@@ -260,22 +260,52 @@ print_success "Backup-Skripte kopiert"
 source "/opt/website-engine/modules/config.sh"
 
 print_section "Backup-Konfiguration"
-if [[ -f "/etc/website-engine/backup/ionos.env" || -f "/etc/website-engine/backup/restic.env" ]]; then
-  echo "Backup-Konfiguration erkannt. Möchtest du sie erneuern? (j/n)"
-  read -r renew_backup
-else
-  renew_backup="j"
-fi
+echo "Möchtest du jetzt deine Backup-Credentials einrichten? (j/n)"
+read -r setup_backup
 
-if [[ "$renew_backup" =~ ^[jJ] ]]; then
-  echo "Erneuere Backup-Konfiguration..."
-  # Erstelle IONOS-Konfigurationsdatei aus Template
+if [[ "$setup_backup" =~ ^[jJ] ]]; then
+  echo "Bitte gib die IONOS-Credentials ein:"
+  echo "IONOS-Token (leer lassen, falls nicht gewünscht):"
+  read -r ionos_token
+  echo "IONOS-Server-ID (leer lassen, falls nicht gewünscht):"
+  read -r ionos_server_id
+  echo "IONOS-Volume-ID (leer lassen, falls nicht gewünscht):"
+  read -r ionos_volume_id
+
+  cat > /etc/website-engine/backup/ionos.env << EOF
+# IONOS Cloud API Konfiguration
+IONOS_TOKEN="$ionos_token"
+IONOS_SERVER_ID="$ionos_server_id"
+IONOS_VOLUME_ID="$ionos_volume_id"
+EOF
+  chmod 600 /etc/website-engine/backup/ionos.env
+  print_success "IONOS-Credentials gespeichert"
+
+  echo "Bitte gib die Restic-Credentials ein:"
+  echo "Restic-Repository (z. B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups, leer lassen, falls nicht gewünscht):"
+  read -r restic_repository
+  echo "Restic-Passwort (leer lassen, falls nicht gewünscht):"
+  read -r restic_password
+  echo "AWS Access Key ID (leer lassen, falls nicht gewünscht):"
+  read -r aws_access_key_id
+  echo "AWS Secret Access Key (leer lassen, falls nicht gewünscht):"
+  read -r aws_secret_access_key
+
+  cat > /etc/website-engine/backup/restic.env << EOF
+# Restic configuration
+export RESTIC_REPOSITORY="$restic_repository"
+export RESTIC_PASSWORD="$restic_password"
+export AWS_ACCESS_KEY_ID="$aws_access_key_id"
+export AWS_SECRET_ACCESS_KEY="$aws_secret_access_key"
+EOF
+  chmod 600 /etc/website-engine/backup/restic.env
+  print_success "Restic-Credentials gespeichert"
+else
+  # Standard-Template erstellen
   if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
     cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
     chmod 600 /etc/website-engine/backup/ionos.env
-    print_success "IONOS-Konfigurationsvorlage erstellt"
   else 
-    print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
     cat > /etc/website-engine/backup/ionos.env << 'EOF'
 # IONOS Cloud API Konfiguration
 IONOS_TOKEN=""
@@ -294,9 +324,7 @@ export AWS_ACCESS_KEY_ID=""  # S3 Access Key
 export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
 EOF
   chmod 600 /etc/website-engine/backup/restic.env
-  print_success "Restic-Konfigurationsdatei erstellt"
-else
-  print_warning "Backup-Konfiguration wurde nicht erneuert. Bestehende Konfiguration bleibt erhalten."
+  print_warning "Backup-Credentials wurden nicht eingerichtet. Du kannst dies später tun, indem du die Dateien in /etc/website-engine/backup/ bearbeitest."
 fi
 
 # 10. Final check
