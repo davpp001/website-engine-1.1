@@ -213,26 +213,34 @@ fi
 # 5. Installiere Wildcard-SSL-Zertifikat
 print_section "Installiere Wildcard-SSL-Zertifikat"
 
-# Überprüfe, ob die Cloudflare-API-Zugangsdaten vorhanden sind
+# Überprüfe, ob die Cloudflare-API-Daten vorhanden sind
 if [[ ! -f "/etc/letsencrypt/cloudflare.ini" ]]; then
-  print_error "Cloudflare-API-Zugangsdaten fehlen. Bitte erstellen Sie die Datei /etc/letsencrypt/cloudflare.ini."
+  print_error "Cloudflare-API-Zugangsdaten fehlen. Erstelle die Datei /etc/letsencrypt/cloudflare.ini mit folgendem Inhalt:"
+  echo "dns_cloudflare_api_token = <DEIN_CLOUDFLARE_API_TOKEN>"
   exit 1
 fi
 
 # Setze Berechtigungen für die Zugangsdaten
 chmod 600 /etc/letsencrypt/cloudflare.ini
 
+# Installiere das DNS-Plugin, falls es fehlt
+if ! dpkg -l | grep -q "python3-certbot-dns-cloudflare"; then
+  print_warning "DNS-Plugin für Certbot fehlt. Installiere es jetzt..."
+  apt-get install -y python3-certbot-dns-cloudflare
+  print_success "DNS-Plugin für Certbot installiert"
+fi
+
 # Erstelle Wildcard-Zertifikat mit certbot und der DNS-01-Challenge
 if certbot certonly \
   --dns-cloudflare \
   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
   --agree-tos \
-  --email admin@domain.com \
-  -d "*.domain.com" \
+  --email "$SSL_EMAIL" \
+  -d "*.$SERVER_DOMAIN" \
   --non-interactive; then
   print_success "Wildcard-SSL-Zertifikat erfolgreich installiert"
 else
-  print_error "Fehler bei der Installation des Wildcard-SSL-Zertifikats"
+  print_error "Fehler bei der Installation des Wildcard-SSL-Zertifikats. Bitte prüfen Sie die Cloudflare-API-Daten und versuchen Sie es erneut."
   exit 1
 fi
 
