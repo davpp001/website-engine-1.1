@@ -558,7 +558,7 @@ function enable_vhost() {
   if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
     log "ERROR" "Konnte vHost nicht aktivieren - Symlink fehlt immer noch"
     return 1
-  fi
+  }
   
   log "SUCCESS" "Apache vHost für $SUB aktiviert"
   return 0
