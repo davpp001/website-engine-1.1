@@ -320,7 +320,34 @@ sudo apache2ctl -t > /dev/null 2>&1 || {
   echo "❌ Apache-Syntax ungültig. Bitte überprüfe die Konfiguration."
   exit 1
 }
+
+# Überprüfe explizit, ob die Site korrekt aktiviert wurde
+if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+  echo "⚠️ Site wurde nicht aktiviert. Versuche es manuell..."
+  sudo a2ensite "${SUB}.conf" || {
+    echo "❌ Konnte vHost nicht aktivieren"
+    exit 1
+  }
+  # Überprüfe, ob der symbolische Link jetzt existiert
+  if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+    echo "⚠️ a2ensite hat keinen Symlink erstellt, erstelle ihn manuell"
+    sudo ln -sf "/etc/apache2/sites-available/${SUB}.conf" "/etc/apache2/sites-enabled/${SUB}.conf" || {
+      echo "❌ Konnte Symlink nicht manuell erstellen"
+      exit 1
+    }
+  fi
+  echo "✅ Site wurde erfolgreich aktiviert"
+fi
+
+# Zeige Apache-Status an (Debug)
+echo "📋 Apache-Konfigurationsstatus:"
+echo " - Verfügbare Sites: $(ls -la /etc/apache2/sites-available/${SUB}*.conf 2>/dev/null || echo 'Keine Konfiguration gefunden')"
+echo " - Aktivierte Sites: $(ls -la /etc/apache2/sites-enabled/${SUB}*.conf 2>/dev/null || echo 'Keine aktivierte Konfiguration gefunden')"
+
+# Apache neu laden
+echo "🔄 Apache-Dienst wird neu geladen..."
 sudo systemctl reload apache2
+sudo systemctl status apache2 --no-pager
 
 # Complete
 if [[ $SSL_OK -eq 1 ]]; then

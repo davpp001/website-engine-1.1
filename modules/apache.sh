@@ -474,15 +474,9 @@ VHOST_EOF
     return 1
   fi
   
-  # Aktiviere diese Konfiguration (wichtig!)
-  sudo a2ensite "${SUB}.conf" > /dev/null 2>&1 || {
-    log "ERROR" "Konnte vHost nicht aktivieren mit a2ensite"
-    return 1
-  }
-  
-  # Lade Apache neu
-  sudo systemctl reload apache2 > /dev/null 2>&1 || {
-    log "ERROR" "Konnte Apache nicht neu laden"
+  # Aktiviere diese Konfiguration mit unserer verbesserten Funktion (wichtig!)
+  enable_vhost "$SUB" || {
+    log "ERROR" "Konnte vHost nicht aktivieren"
     return 1
   }
   
@@ -541,15 +535,28 @@ function enable_vhost() {
     fi
   fi
   
-  # Aktiviere vHost mit a2ensite
-  sudo a2ensite "${SUB}.conf" > /dev/null 2>&1 || {
-    log "ERROR" "Konnte vHost nicht aktivieren mit a2ensite"
-    return 1
-  }
+  # Aktiviere vHost mit a2ensite und stelle sicher, dass der Symlink erstellt wird
+  sudo a2ensite "${SUB}.conf" > /dev/null 2>&1
+  
+  # Überprüfe explizit, ob der Symlink existiert
+  if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+    log "WARNING" "a2ensite hat keinen Symlink erstellt, erstelle ihn manuell"
+    # Erstelle den Symlink manuell
+    sudo ln -sf "/etc/apache2/sites-available/${SUB}.conf" "/etc/apache2/sites-enabled/${SUB}.conf" || {
+      log "ERROR" "Konnte Symlink nicht manuell erstellen"
+      return 1
+    }
+  fi
   
   # Lade Apache neu
   sudo systemctl reload apache2 > /dev/null 2>&1 || {
     log "ERROR" "Konnte Apache nicht neu laden"
+    return 1
+  }
+  
+  # Überprüfe, ob die Site jetzt aktiviert ist
+  if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+    log "ERROR" "Konnte vHost nicht aktivieren - Symlink fehlt immer noch"
     return 1
   }
   
@@ -625,10 +632,27 @@ function setup_vhost() {
   fi
   
   # Jetzt versuchen, den vHost zu aktivieren
-  enable_vhost "$SUB" || {
-    log "ERROR" "Konnte vHost nicht aktivieren"
-    return 1
-  }
+  log "INFO" "Aktiviere vHost für $SUB"
+  if ! enable_vhost "$SUB"; then
+    log "WARNING" "Aktivierung mit enable_vhost fehlgeschlagen, versuche direkten Ansatz"
+    
+    # Direkt Symlink prüfen und erstellen
+    if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+      log "INFO" "Erzeuge Symlink manuell"
+      sudo ln -sf "/etc/apache2/sites-available/${SUB}.conf" "/etc/apache2/sites-enabled/${SUB}.conf" || {
+        log "ERROR" "Konnte Symlink nicht manuell erstellen"
+        return 1
+      }
+    fi
+    
+    # Überprüfe, ob der Symlink jetzt existiert
+    if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
+      log "ERROR" "Konnte vHost nicht aktivieren - Symlink fehlt"
+      return 1
+    else
+      log "SUCCESS" "vHost manuell aktiviert"
+    fi
+  fi
   
   log "SUCCESS" "Apache vHost für $FQDN erfolgreich eingerichtet"
   return 0
