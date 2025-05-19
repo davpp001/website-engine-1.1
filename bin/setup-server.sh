@@ -164,7 +164,7 @@ SERVER_DOMAIN="$(grep DOMAIN= /opt/website-engine/modules/config.sh | cut -d'"' 
 
 if [[ -z "$SERVER_DOMAIN" ]]; then
   print_warning "Domain konnte nicht aus der Konfiguration gelesen werden."
-  SERVER_DOMAIN="s-neue.website"
+  SERVER_DOMAIN="example.com"
 fi
 
 # Admin-E-Mail-Adresse abfragen
@@ -172,60 +172,24 @@ echo "Bitte gib die Admin-E-Mail für das SSL-Zertifikat ein (Standard: admin@$S
 read -r SSL_EMAIL
 SSL_EMAIL=${SSL_EMAIL:-"admin@$SERVER_DOMAIN"}
 
-echo "Soll ein Wildcard-Zertifikat (*.domain.com) erstellt werden? Das erfordert ggf. DNS-Plugins. (j/n)"
-read -r wildcard_response
-
-if [[ "$wildcard_response" =~ ^[jJ] ]]; then
-  print_warning "Versuche ein Wildcard-SSL-Zertifikat für *.$SERVER_DOMAIN zu erstellen..."
-  
-  # Prüfen, ob DNS-Plugin installiert ist
-  if dpkg -l | grep -q "python3-certbot-dns-cloudflare"; then
-    print_success "DNS-Plugin für Cloudflare gefunden"
-    echo "Hinweis: Für ein Wildcard-Zertifikat wird die Datei /etc/letsencrypt/cloudflare/credentials.ini benötigt."
-    echo "Mit deinen Cloudflare API-Zugangsdaten. Erstelle diese, falls noch nicht geschehen."
-    
-    if certbot certonly --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/cloudflare/credentials.ini \
-      -d "$SERVER_DOMAIN" -d "*.$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"; then
-      print_success "Wildcard-SSL-Zertifikat erfolgreich erstellt!"
-    else
-      print_warning "Wildcard-Zertifikat konnte nicht erstellt werden. Erstelle Standard-Zertifikat..."
-      certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"
-      print_success "Standard-SSL-Zertifikat erstellt"
-    fi
-  else
-    print_warning "Kein DNS-Plugin für Certbot gefunden. Erstelle Standard-Zertifikat..."
-    certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"
-    print_success "Standard-SSL-Zertifikat erstellt"
-    echo "Für ein Wildcard-Zertifikat installiere: sudo apt-get install python3-certbot-dns-cloudflare"
-  fi
-else
-  print_warning "Erstelle Standard-SSL-Zertifikat für $SERVER_DOMAIN..."
-  if certbot --apache -d "$SERVER_DOMAIN" --agree-tos --email "$SSL_EMAIL"; then
-    print_success "Standard-SSL-Zertifikat erfolgreich erstellt!"
-  else
-    print_error "SSL-Zertifikat konnte nicht erstellt werden."
-    print_warning "SSL-Zertifikat muss manuell eingerichtet werden."
-    echo "Später mit folgendem Befehl:"
-    echo "certbot --apache -d $SERVER_DOMAIN --agree-tos --email $SSL_EMAIL"
-  fi
-fi
-
-# 5. Installiere Wildcard-SSL-Zertifikat
-print_section "Installiere Wildcard-SSL-Zertifikat"
-
-# Überprüfe, ob die Cloudflare-API-Daten vorhanden sind
+# Automatische Erstellung der Cloudflare-Zugangsdaten-Datei
 if [[ ! -f "/etc/letsencrypt/cloudflare.ini" ]]; then
-  print_error "Cloudflare-API-Zugangsdaten fehlen. Erstelle die Datei /etc/letsencrypt/cloudflare.ini mit folgendem Inhalt:"
-  echo "dns_cloudflare_api_token = <DEIN_CLOUDFLARE_API_TOKEN>"
-  exit 1
-fi
+  print_section "Erstelle Cloudflare-Zugangsdaten"
+  echo "Bitte gib deinen Cloudflare API-Token ein:"
+  read -r CF_API_TOKEN
 
-# Setze Berechtigungen für die Zugangsdaten
-chmod 600 /etc/letsencrypt/cloudflare.ini
+  mkdir -p /etc/letsencrypt/cloudflare
+  cat > /etc/letsencrypt/cloudflare.ini << EOF
+# Cloudflare API credentials
+dns_cloudflare_api_token = $CF_API_TOKEN
+EOF
+  chmod 600 /etc/letsencrypt/cloudflare.ini
+  print_success "Cloudflare-Zugangsdaten erstellt"
+fi
 
 # Installiere das DNS-Plugin, falls es fehlt
 if ! dpkg -l | grep -q "python3-certbot-dns-cloudflare"; then
-  print_warning "DNS-Plugin für Certbot fehlt. Installiere es jetzt..."
+  print_section "Installiere DNS-Plugin für Certbot"
   apt-get install -y python3-certbot-dns-cloudflare
   print_success "DNS-Plugin für Certbot installiert"
 fi
@@ -248,14 +212,14 @@ fi
 print_section "Konfiguriere Apache für Wildcard-SSL"
 cat <<EOF > /etc/apache2/sites-available/000-default-ssl.conf
 <VirtualHost *:443>
-    ServerName domain.com
-    ServerAlias *.domain.com
+    ServerName $SERVER_DOMAIN
+    ServerAlias *.$SERVER_DOMAIN
 
     DocumentRoot /var/www/html
 
     SSLEngine on
-    SSLCertificateFile /etc/letsencrypt/live/domain.com/fullchain.pem
-    SSLCertificateKeyFile /etc/letsencrypt/live/domain.com/privkey.pem
+    SSLCertificateFile /etc/letsencrypt/live/$SERVER_DOMAIN/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/$SERVER_DOMAIN/privkey.pem
 
     <Directory /var/www/html>
         Options Indexes FollowSymLinks
