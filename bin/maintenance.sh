@@ -226,7 +226,9 @@ else
 fi
 
 # 4. Prüfe SSL-Zertifikate
-print_section "Prüfe SSL-Zertifikate"  if command -v certbot &>/dev/null; then
+print_section "Prüfe SSL-Zertifikate"
+
+if command -v certbot &>/dev/null; then
   echo "Prüfe auf bald ablaufende Zertifikate..."
   certbot_output=$(certbot certificates 2>/dev/null || echo "Fehler bei certbot certificates")
   
@@ -240,32 +242,25 @@ print_section "Prüfe SSL-Zertifikate"  if command -v certbot &>/dev/null; then
       expiry_warning=0
       
       # Extrahiere alle Zertifikatsnamen
-      cert_names=$(echo "$certbot_output" | grep -oP 'Certificate Name: \K.*' || echo "")
+      cert_names=$(echo "$certbot_output" | grep "Certificate Name:" | sed -E 's/.*Certificate Name: (.*)/\1/' || echo "")
       
       # Extrahiere alle Ablaufdaten
       while IFS= read -r line; do
         if [[ "$line" == *"Expiry Date:"* ]]; then
           # Extrahiere das Ablaufdatum und die Anzahl der verbleibenden Tage
-          expiry_info=$(echo "$line" | grep -oP 'Expiry Date: \K[^(]+ \([^)]+\)')
-          expiry_date=$(echo "$expiry_info" | cut -d'(' -f1)
-          days_info=$(echo "$expiry_info" | grep -oP '\(VALID: \K[0-9]+')
+          expiry_info=$(echo "$line" | sed -E 's/.*Expiry Date: ([^(]+) \(([^)]+)\).*/\1 \2/')
+          expiry_date=$(echo "$expiry_info" | awk '{print $1, $2, $3}')
+          days_info=$(echo "$line" | grep -o "VALID: [0-9]\+" | grep -o "[0-9]\+")
           
           if [[ -n "$days_info" ]]; then
             days_left=$days_info
             
             # Prüfe, ob das Zertifikat bald abläuft
             if [[ $days_left -lt 30 ]]; then
-              cert_name=$(echo "$certbot_output" | grep -B5 "$line" | grep "Certificate Name" | head -1 | grep -oP 'Certificate Name: \K.*')
+              cert_name=$(echo "$certbot_output" | grep -B5 "$line" | grep "Certificate Name" | head -1 | sed -E 's/.*Certificate Name: (.*)/\1/')
               print_warning "Zertifikat '$cert_name' läuft in $days_left Tagen ab"
               expiry_warning=1
             fi
-          fi
-        fi
-      done <<< "$certbot_output"
-          
-          if [[ $days_left -lt 30 ]]; then
-            print_warning "Zertifikat läuft in $days_left Tagen ab: $line"
-            expiry_warning=1
           fi
         fi
       done <<< "$certbot_output"
@@ -289,7 +284,7 @@ print_section "Prüfe SSL-Zertifikate"  if command -v certbot &>/dev/null; then
       # Keine Zertifikate gefunden oder Format nicht erkannt
       if [[ "$certbot_output" == *"Certificate Name"* || "$certbot_output" == *"Expiry Date"* ]]; then
         # Zertifikatsausgabe erkannt, aber Format nicht wie erwartet - versuche Anzahl zu ermitteln
-        cert_count=$(echo "$certbot_output" | grep -c "Certificate Name:")
+        cert_count=$(echo "$certbot_output" | grep -c "Certificate Name:" || echo "0")
         if [[ $cert_count -gt 0 ]]; then
           print_success "$cert_count Zertifikate gefunden, aber das Format konnte nicht vollständig analysiert werden."
         else
