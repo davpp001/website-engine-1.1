@@ -639,9 +639,9 @@ function remove_vhost() {
       sudo rm -f "$temp_file"
     fi
   done
-  else
-    log "INFO" "vHost-Konfiguration existiert nicht: $VHOST_CONFIG"
-  fi
+  
+  # Erfolgslog
+  log "INFO" "Konfigurationen für $SUB bereinigt"
   
   # 3. Prüfe auf zusätzliche SSL-Konfiguration
   local SSL_VHOST_CONFIG="${APACHE_SITES_DIR}/${SUB}-le-ssl.conf"
