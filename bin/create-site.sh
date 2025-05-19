@@ -122,15 +122,13 @@ else
     echo "Bitte führe aus: source /etc/profile.d/cloudflare.sh"
     exit 1
   fi
-  
   echo "🌐 Erstelle Cloudflare DNS-Eintrag..."
   SUB=$(create_subdomain "$SUBDOMAIN") || {
     echo "❌ Konnte DNS-Eintrag nicht erstellen"
     exit 1
   }
-  
-  # Wait for DNS propagation (optimiert: bis zu 10 Minuten, sonst Abbruch)
-  MAX_DNS_CHECKS=40  # 40*15s = 10 Minuten
+  # Zwingend auf DNS-Propagation warten (bis zu 10 Minuten)
+  MAX_DNS_CHECKS=40
   DNS_WAIT_SECONDS=15
   DNS_CHECK_PASSED=0
   for ((i=1; i<=MAX_DNS_CHECKS; i++)); do
@@ -143,125 +141,28 @@ else
       echo "⏳ Noch nicht verfügbar, warte $DNS_WAIT_SECONDS Sekunden..."
       sleep $DNS_WAIT_SECONDS
     fi
-
   done
   if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
     echo "❌ DNS-Propagation konnte nach $((MAX_DNS_CHECKS*DNS_WAIT_SECONDS/60)) Minuten nicht verifiziert werden. Breche ab."
-    if [[ $TEST_MODE -eq 0 ]]; then
-      delete_subdomain "$SUB"
-    fi
+    delete_subdomain "$SUB"
     exit 1
   else
     echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
   fi
 fi
 
-# 2) Setup Apache virtual host
+# 2) Setup Apache virtual host (HTTP)
 echo "🌐 Erstelle Apache vHost..."
 setup_vhost "$SUB" || {
   echo "❌ Fehler beim Erstellen des Apache vHost."
-  
-  # Cleanup in case of error
   if [[ $TEST_MODE -eq 0 ]]; then
     echo "🧹 Bereinige DNS-Einträge..."
     delete_subdomain "$SUB"
   fi
-  
   exit 1
 }
 
-# 3) Install WordPress
-echo "📦 Installiere WordPress..."
-install_wordpress "$SUB" || {
-  echo "❌ Fehler bei der WordPress-Installation."
-  
-  # Cleanup in case of error
-  echo "🧹 Bereinige vHost und DNS-Einträge..."
-  remove_vhost "$SUB"
-  
-  if [[ $TEST_MODE -eq 0 ]]; then
-    delete_subdomain "$SUB"
-  fi
-  
-  exit 1
-}
-
-
-# SSL-Zertifikat einrichten (bewährte direkte Methode)
-echo "🔒 Richte SSL-Zertifikat mit certbot --apache ein..."
-
-# Zusätzliche DNS-Überprüfung, um sicherzustellen, dass DNS propagiert ist
-echo "🌐 Prüfe DNS-Propagation für ${SUB}.${DOMAIN}..."
-DNS_CHECK_PASSED=0
-MAX_DNS_CHECKS=5
-DNS_WAIT_SECONDS=15
-
-for ((i=1; i<=MAX_DNS_CHECKS; i++)); do
-  echo -n "DNS-Prüfung $i von $MAX_DNS_CHECKS: "
-  
-  if host "${SUB}.${DOMAIN}" &>/dev/null || dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
-    echo "✅ Erfolgreich!"
-    DNS_CHECK_PASSED=1
-    break
-  else
-    echo "⏳ Noch nicht verfügbar, warte $DNS_WAIT_SECONDS Sekunden..."
-    sleep $DNS_WAIT_SECONDS
-  fi
-done
-
-if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
-  echo "⚠️ DNS-Propagation konnte nicht verifiziert werden. Dies könnte zu Problemen bei der SSL-Zertifikatserstellung führen."
-  echo "   Fahre dennoch fort..."
-else
-  echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
-fi
-
-# 1. Erstelle einfache Apache-Konfiguration
-echo "📝 Erstelle Apache-Konfiguration"
-
-# Entferne alte Konfigurationen
-sudo a2dissite "*${SUB}*" &>/dev/null || true
-sudo rm -f "/etc/apache2/sites-available/*${SUB}*" &>/dev/null || true
-
-# Stelle sicher, dass Verzeichnis existiert und .well-known Ordner angelegt ist
-sudo mkdir -p "${WP_DIR}/${SUB}/.well-known/acme-challenge"
-sudo chown -R www-data:www-data "${WP_DIR}/${SUB}"
-
-# Erstelle Test-Dateien für ACME Challenge (hilfreich für Debugging)
-echo "This is an ACME challenge directory test file" | sudo tee "${WP_DIR}/${SUB}/.well-known/acme-challenge/test.txt" > /dev/null
-sudo chmod 644 "${WP_DIR}/${SUB}/.well-known/acme-challenge/test.txt"
-
-# Einfache neue Konfiguration
-sudo tee "/etc/apache2/sites-available/${SUB}.conf" > /dev/null << EOF
-<VirtualHost *:80>
-  ServerName ${SUB}.${DOMAIN}
-  DocumentRoot ${WP_DIR}/${SUB}
-  
-  <Directory ${WP_DIR}/${SUB}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-  </Directory>
-  
-  # Unterstützung für ACME-Challenge (Let's Encrypt)
-  <Directory "${WP_DIR}/${SUB}/.well-known/acme-challenge">
-    Options None
-    AllowOverride None
-    Require all granted
-  </Directory>
-</VirtualHost>
-EOF
-
-# 2. Aktiviere die Site
-echo "🔄 Aktiviere VirtualHost"
-sudo a2ensite "${SUB}.conf"
-sudo systemctl reload apache2
-
-# Warte kurz, damit Apache sich neu laden kann
-sleep 2
-
-# 3. SSL direkt mit Apache-Plugin erstellen
-echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache"
+# 3) SSL-Zertifikat erstellen (bis zu 3 Versuche, sonst Abbruch)
 SSL_OK=0
 for ssl_try in {1..3}; do
   echo "🔐 [Versuch $ssl_try/3] Erstelle und installiere SSL-Zertifikat mit certbot --apache"
@@ -272,17 +173,30 @@ for ssl_try in {1..3}; do
     echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Warte 30 Sekunden und versuche es erneut..."
     sleep 30
   fi
-
 done
 if [[ $SSL_OK -eq 0 ]]; then
   echo "❌ SSL-Installation nach 3 Versuchen fehlgeschlagen. Breche ab."
-  echo "   Bitte prüfe die DNS-Einträge und versuche es später erneut."
   remove_vhost "$SUB"
   if [[ $TEST_MODE -eq 0 ]]; then
     delete_subdomain "$SUB"
   fi
   exit 1
 fi
+
+# 4) Apache vHost auf HTTPS umstellen (optional, falls nötig)
+# ...hier ggf. weitere Optimierung möglich...
+
+# 5) Install WordPress (nur wenn SSL erfolgreich)
+echo "📦 Installiere WordPress..."
+install_wordpress "$SUB" || {
+  echo "❌ Fehler bei der WordPress-Installation."
+  echo "🧹 Bereinige vHost und DNS-Einträge..."
+  remove_vhost "$SUB"
+  if [[ $TEST_MODE -eq 0 ]]; then
+    delete_subdomain "$SUB"
+  fi
+  exit 1
+}
 
 # Complete
 FINAL_URL="https://$SUB.$DOMAIN"
