@@ -213,6 +213,11 @@ function install_wordpress() {
   
   log "INFO" "Installiere WordPress für $SUB in $DOCROOT"
   
+  # Stelle sicher, dass das Verzeichnis existiert und die richtigen Berechtigungen hat
+  sudo mkdir -p "$DOCROOT"
+  sudo chown -R www-data:www-data "$DOCROOT"
+  sudo chmod -R 755 "$DOCROOT"
+  
   # Stelle sicher, dass Anmeldedaten geladen sind
   load_env_vars
   

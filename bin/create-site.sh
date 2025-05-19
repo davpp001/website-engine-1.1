@@ -314,6 +314,14 @@ else
   }
 fi
 
+# Stelle sicher, dass Apache die Konfiguration erkannt hat und neu lädt
+echo "🔄 Überprüfe und aktiviere Apache-Konfiguration..."
+sudo apache2ctl -t > /dev/null 2>&1 || {
+  echo "❌ Apache-Syntax ungültig. Bitte überprüfe die Konfiguration."
+  exit 1
+}
+sudo systemctl reload apache2
+
 # Complete
 if [[ $SSL_OK -eq 1 ]]; then
   FINAL_URL="https://$SUB.$DOMAIN"

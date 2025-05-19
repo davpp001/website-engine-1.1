@@ -318,6 +318,11 @@ function create_vhost_config() {
   
   log "INFO" "Erstelle Apache vHost-Konfiguration für $FQDN in $VHOST_CONFIG"
   
+  # Stelle sicher, dass das Dokumentwurzelverzeichnis existiert
+  sudo mkdir -p "$DOCROOT"
+  sudo chown -R www-data:www-data "$DOCROOT"
+  sudo chmod -R 755 "$DOCROOT"
+  
   # Bestimme, welche SSL-Zertifikate verwendet werden sollen
   local CERT_PATH=""
   local KEY_PATH=""
@@ -468,6 +473,18 @@ VHOST_EOF
     log "ERROR" "Konnte vHost-Konfiguration nicht erstellen: $VHOST_CONFIG"
     return 1
   fi
+  
+  # Aktiviere diese Konfiguration (wichtig!)
+  sudo a2ensite "${SUB}.conf" > /dev/null 2>&1 || {
+    log "ERROR" "Konnte vHost nicht aktivieren mit a2ensite"
+    return 1
+  }
+  
+  # Lade Apache neu
+  sudo systemctl reload apache2 > /dev/null 2>&1 || {
+    log "ERROR" "Konnte Apache nicht neu laden"
+    return 1
+  }
   
     if grep -q "SSLCertificateFile" "$VHOST_CONFIG"; then
     # Nur prüfen, wenn es sich um eine SSL-Konfiguration handelt
