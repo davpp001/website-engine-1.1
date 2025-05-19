@@ -129,11 +129,31 @@ else
     exit 1
   }
   
-  # Wait for DNS propagation
-  wait_for_dns "$SUB" 120 || {
-    echo "⚠️ DNS-Propagation konnte nicht verifiziert werden"
-    echo "Fahre trotzdem fort. Sie müssen möglicherweise warten, bis DNS-Änderungen wirksam werden."
-  }
+  # Wait for DNS propagation (optimiert: bis zu 10 Minuten, sonst Abbruch)
+  MAX_DNS_CHECKS=40  # 40*15s = 10 Minuten
+  DNS_WAIT_SECONDS=15
+  DNS_CHECK_PASSED=0
+  for ((i=1; i<=MAX_DNS_CHECKS; i++)); do
+    echo -n "DNS-Prüfung $i von $MAX_DNS_CHECKS: "
+    if host "${SUB}.${DOMAIN}" &>/dev/null || dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
+      echo "✅ Erfolgreich!"
+      DNS_CHECK_PASSED=1
+      break
+    else
+      echo "⏳ Noch nicht verfügbar, warte $DNS_WAIT_SECONDS Sekunden..."
+      sleep $DNS_WAIT_SECONDS
+    fi
+
+  done
+  if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
+    echo "❌ DNS-Propagation konnte nach $((MAX_DNS_CHECKS*DNS_WAIT_SECONDS/60)) Minuten nicht verifiziert werden. Breche ab."
+    if [[ $TEST_MODE -eq 0 ]]; then
+      delete_subdomain "$SUB"
+    fi
+    exit 1
+  else
+    echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
+  fi
 fi
 
 # 2) Setup Apache virtual host
@@ -242,30 +262,27 @@ sleep 2
 
 # 3. SSL direkt mit Apache-Plugin erstellen
 echo "🔐 Erstelle und installiere SSL-Zertifikat mit certbot --apache"
-sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}" || {
-  echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Versuche alternative Methode..."
-  
-  # Versuche das separate direct-ssl.sh Skript
-  echo "🔄 Starte alternatives SSL-Setup mit direct-ssl.sh..."
-  sudo /opt/website-engine-1.1/bin/direct-ssl.sh "${SUB}.${DOMAIN}" || {
-    echo "❌ SSL-Installation fehlgeschlagen!"
-    echo
-    echo "   Mögliche Ursachen:"
-    echo "   - DNS-Propagation ist noch nicht abgeschlossen"
-    echo "   - Port 80 ist durch anderen Dienst blockiert"
-    echo "   - Certbot-Server hat temporäre Probleme"
-    echo
-    echo "   Diagnostik:"
-    echo "   - Überprüfe die DNS-Einträge: dig ${SUB}.${DOMAIN}"
-    echo "   - Teste HTTP-Erreichbarkeit: curl -I http://${SUB}.${DOMAIN}/.well-known/acme-challenge/test.txt"
-    echo
-    echo "   Lösung:"
-    echo "   Versuche später die SSL-Installation manuell mit:"
-    echo "   sudo direct-ssl ${SUB}.${DOMAIN}"
-    echo
-    echo "   Die WordPress-Seite ist verfügbar, aber ohne SSL!"
-  }
-}
+SSL_OK=0
+for ssl_try in {1..3}; do
+  echo "🔐 [Versuch $ssl_try/3] Erstelle und installiere SSL-Zertifikat mit certbot --apache"
+  if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}"; then
+    SSL_OK=1
+    break
+  else
+    echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Warte 30 Sekunden und versuche es erneut..."
+    sleep 30
+  fi
+
+done
+if [[ $SSL_OK -eq 0 ]]; then
+  echo "❌ SSL-Installation nach 3 Versuchen fehlgeschlagen. Breche ab."
+  echo "   Bitte prüfe die DNS-Einträge und versuche es später erneut."
+  remove_vhost "$SUB"
+  if [[ $TEST_MODE -eq 0 ]]; then
+    delete_subdomain "$SUB"
+  fi
+  exit 1
+fi
 
 # Complete
 FINAL_URL="https://$SUB.$DOMAIN"
