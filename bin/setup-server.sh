@@ -210,6 +210,57 @@ else
   fi
 fi
 
+# 5. Installiere Wildcard-SSL-Zertifikat
+print_section "Installiere Wildcard-SSL-Zertifikat"
+
+# Überprüfe, ob die Cloudflare-API-Zugangsdaten vorhanden sind
+if [[ ! -f "/etc/letsencrypt/cloudflare.ini" ]]; then
+  print_error "Cloudflare-API-Zugangsdaten fehlen. Bitte erstellen Sie die Datei /etc/letsencrypt/cloudflare.ini."
+  exit 1
+fi
+
+# Setze Berechtigungen für die Zugangsdaten
+chmod 600 /etc/letsencrypt/cloudflare.ini
+
+# Erstelle Wildcard-Zertifikat mit certbot und der DNS-01-Challenge
+if certbot certonly \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+  --agree-tos \
+  --email admin@domain.com \
+  -d "*.domain.com" \
+  --non-interactive; then
+  print_success "Wildcard-SSL-Zertifikat erfolgreich installiert"
+else
+  print_error "Fehler bei der Installation des Wildcard-SSL-Zertifikats"
+  exit 1
+fi
+
+# Konfiguriere Apache für die Verwendung des Wildcard-Zertifikats
+print_section "Konfiguriere Apache für Wildcard-SSL"
+cat <<EOF > /etc/apache2/sites-available/000-default-ssl.conf
+<VirtualHost *:443>
+    ServerName domain.com
+    ServerAlias *.domain.com
+
+    DocumentRoot /var/www/html
+
+    SSLEngine on
+    SSLCertificateFile /etc/letsencrypt/live/domain.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/domain.com/privkey.pem
+
+    <Directory /var/www/html>
+        Options Indexes FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOF
+
+a2ensite 000-default-ssl
+systemctl reload apache2
+print_success "Apache für Wildcard-SSL konfiguriert"
+
 # 9. Set up backup scripts
 print_section "Richte Backup-System ein"
 
