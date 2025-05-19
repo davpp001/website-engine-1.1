@@ -24,4 +24,28 @@ The site should now be properly configured with Apache and display the WordPress
 
 ## Technical Details
 
-The issue was occurring because the Apache configuration files were correctly created in `sites-available/` but they weren't being properly enabled (symlinked) in `sites-enabled/`. This caused Apache to use its default virtual host configuration instead of the custom one for the new WordPress site.
+Das Problem hatte mehrere Ursachen:
+
+1. Die Apache-Konfigurationsdateien wurden zwar in `sites-available/` erstellt und mittels Symlink in `sites-enabled/` aktiviert, aber die Apache-Standardseite (`000-default.conf`) blieb aktiv.
+
+2. Die VirtualHost-Direktiven für Port 80 enthielten keinen `DocumentRoot`, was dazu führte, dass Apache in manchen Fällen nicht wusste, welches Verzeichnis für die Anfrage verwendet werden sollte.
+
+3. Mehrere VirtualHost-Direktiven konkurrierten miteinander, ohne dass die korrekte Priorität eingehalten wurde.
+
+## Finale Lösung
+
+Um das Problem zu lösen, führen Sie folgende Schritte auf dem Server aus:
+
+```bash
+# 1. Deaktivieren Sie die Apache-Standardseite
+sudo a2dissite 000-default
+sudo systemctl reload apache2
+
+# 2. Starten Sie Apache neu (wichtig!)
+sudo systemctl restart apache2
+
+# 3. Führen Sie das Fix-Skript aus, wenn die Sites immer noch Probleme haben
+sudo /opt/website-engine-1.1/bin/fix-apache.sh
+```
+
+Das `fix-apache.sh`-Skript überprüft und repariert alle VirtualHost-Konfigurationen, stellt sicher, dass `DocumentRoot` in allen HTTP-VirtualHosts definiert ist, und deaktiviert die Default-Site, die sonst Vorrang vor Ihren WordPress-Sites hätte.

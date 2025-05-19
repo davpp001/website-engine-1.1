@@ -339,10 +339,14 @@ if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
   echo "✅ Site wurde erfolgreich aktiviert"
 fi
 
-# Deaktiviere die Default-Site, wenn sie noch aktiv ist
+# Deaktiviere die Default-Site definitiv, wenn sie noch aktiv ist
 if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
   echo "⚠️ Apache Default-Site ist aktiv und kann Konflikte verursachen. Wird deaktiviert..."
   sudo a2dissite 000-default > /dev/null 2>&1
+  # Entferne den Symlink direkt, falls a2dissite nicht funktioniert hat
+  if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
+    sudo rm -f /etc/apache2/sites-enabled/000-default.conf
+  fi
   echo "✅ Default-Site wurde deaktiviert"
 fi
 
@@ -354,7 +358,27 @@ if [[ -n "$competing_sites" ]]; then
     echo "   - $site"
   done
   echo "   Überprüfen Sie die ServerName-Direktiven in diesen Dateien."
+  
+  # Stelle sicher, dass alle VirtualHost-Konfigurationen DocumentRoot in HTTP und HTTPS haben
+  echo "🔧 Optimiere konkurrierende VirtualHost-Konfigurationen..."
+  for vhost_file in $competing_sites; do
+    site_base=$(basename "$vhost_file")
+    site_name="${site_base%.conf}"
+    
+    # Prüfe, ob DocumentRoot im HTTP-VirtualHost fehlt
+    if ! grep -q "DocumentRoot.*<VirtualHost \*:80>" "$vhost_file"; then
+      echo "   🔨 Füge DocumentRoot zu $site_name hinzu"
+      doc_root=$(grep -oP 'DocumentRoot\s+\K[^ ]+' "$vhost_file" | head -1)
+      if [[ -n "$doc_root" ]]; then
+        # Füge DocumentRoot zur HTTP-VirtualHost-Konfiguration hinzu
+        sudo sed -i '/<VirtualHost \*:80>/,/<\/VirtualHost>/ s|ServerSignature Off|ServerSignature Off\n\n  DocumentRoot '"$doc_root"'|' "$vhost_file"
+      fi
+    fi
+  done
 fi
+
+# Stelle sicher, dass Apache die Änderungen übernimmt
+sudo systemctl reload apache2
 
 # Zeige Apache-Status an (Debug)
 echo "📋 Apache-Konfigurationsstatus:"

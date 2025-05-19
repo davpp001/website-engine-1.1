@@ -374,11 +374,24 @@ function create_vhost_config() {
   ServerAdmin ${WP_EMAIL}
   ServerSignature Off
   
+  # Erhöhe die Priorität, um der Default-Seite vorzuziehen
+  <IfModule mod_setenvif.c>
+    SetEnvIf Host "${FQDN}" VIRTUAL_HOST=1
+  </IfModule>
+  
+  DocumentRoot ${DOCROOT}
+  
   ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
   CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
   
   # Diese Zeile stellt sicher, dass die Umleitung immer funktioniert
-  RedirectMatch 301 ^(?!/\.well-known/acme-challenge/).* https://${FQDN}$0
+  # RedirectMatch hat bei bestimmten Konfigurationen Probleme, daher verwenden wir mod_rewrite
+  <IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{SERVER_NAME} =${FQDN} [OR]
+    RewriteCond %{SERVER_NAME} =www.${FQDN}
+    RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]
+  </IfModule>
 </VirtualHost>
 
 # HTTPS VirtualHost
