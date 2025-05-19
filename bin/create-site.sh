@@ -173,6 +173,13 @@ fi
 
 # 2) Setup Apache virtual host (HTTP)
 echo "🌐 Erstelle Apache vHost..."
+
+# Stelle sicher, dass keine verwaisten Konfigurationen für diese Subdomain existieren
+if type cleanup_apache_configs &>/dev/null; then
+  echo "🧹 Bereinige möglicherweise vorhandene Apache-Konfigurationen..."
+  cleanup_apache_configs "$SUB"
+fi
+
 setup_vhost "$SUB" || {
   echo "❌ Fehler beim Erstellen des Apache vHost."
   if [[ $TEST_MODE -eq 0 ]]; then

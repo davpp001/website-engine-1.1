@@ -26,6 +26,104 @@ function print_error() {
   echo -e "${RED}❌ $1${NC}"
 }
 
+# Neue Funktion zur Bereinigung des Servers
+function reset_server() {
+  local RESET_LEVEL="$1"
+  
+  print_section "SERVERBEREINIGUNG (Level: $RESET_LEVEL)"
+  
+  # Immer durchzuführende Aufgaben (Minimalreset)
+  if [[ "$RESET_LEVEL" == "minimal" || "$RESET_LEVEL" == "standard" || "$RESET_LEVEL" == "full" ]]; then
+    echo "Bereinige Apache-Konfigurationen..."
+    
+    # Deaktiviere alle Sites
+    a2dissite '*' &>/dev/null || true
+    
+    # Entferne -temp-le-ssl.conf-Dateien (diese werden manchmal von Let's Encrypt als temporäre Dateien erstellt)
+    find /etc/apache2/sites-available/ -name "*-temp-le-ssl.conf" -type f -print -delete
+    
+    # Prüfe auf Apache-Konfigurationsdateien ohne entsprechende DocumentRoot-Verzeichnisse
+    echo "Prüfe auf Apache-Konfigurationen mit nicht existierenden DocumentRoot-Verzeichnissen..."
+    for conf_file in /etc/apache2/sites-available/*.conf; do
+      if [[ -f "$conf_file" ]]; then
+        local docroot=$(grep -oP 'DocumentRoot\s+\K[^\s]+' "$conf_file" | head -1)
+        if [[ -n "$docroot" && ! -d "$docroot" ]]; then
+          print_warning "Entferne Konfiguration mit nicht existierendem DocumentRoot: $conf_file (Verzeichnis: $docroot)"
+          rm -f "$conf_file"
+        fi
+      fi
+    done
+    
+    # Reaktiviere default-Konfiguration
+    a2ensite 000-default &>/dev/null || true
+    
+    print_success "Apache-Konfigurationen bereinigt"
+  fi
+  
+  # Standard-Reset (zusätzliche Aufgaben)
+  if [[ "$RESET_LEVEL" == "standard" || "$RESET_LEVEL" == "full" ]]; then
+    echo "Führe Standard-Reset durch..."
+    
+    # Lösche alle SSL-Zertifikate für Subdomains, behalte aber die Hauptdomain-Zertifikate
+    local MAIN_DOMAIN=$(grep DOMAIN= /opt/website-engine-1.1/modules/config.sh 2>/dev/null | cut -d'"' -f2 || echo "")
+    if [[ -n "$MAIN_DOMAIN" && -d "/etc/letsencrypt/live" ]]; then
+      for cert_dir in /etc/letsencrypt/live/*; do
+        if [[ -d "$cert_dir" ]]; then
+          local cert_name=$(basename "$cert_dir")
+          if [[ "$cert_name" != "$MAIN_DOMAIN" && "$cert_name" != "*.$MAIN_DOMAIN" ]]; then
+            print_warning "Entferne SSL-Zertifikat: $cert_name"
+            certbot delete --cert-name "$cert_name" --non-interactive || true
+          fi
+        fi
+      done
+    fi
+    
+    print_success "Standard-Reset abgeschlossen"
+  fi
+  
+  # Vollständiger Reset (zusätzliche Aufgaben)
+  if [[ "$RESET_LEVEL" == "full" ]]; then
+    echo "Führe vollständigen Reset durch..."
+    
+    # Webverzeichnisse bereinigen
+    echo "Leere /var/www/* (außer /var/www/html)"
+    find /var/www -mindepth 1 -maxdepth 1 -type d ! -name "html" -exec rm -rf {} \;
+    
+    # MySQL-Datenbanken bereinigen (außer System-DBs)
+    echo "Bereinige MySQL-Datenbanken..."
+    mysql -e "
+      SELECT CONCAT('DROP DATABASE IF EXISTS ', schema_name, ';')
+      FROM information_schema.schemata
+      WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
+    " | grep -v "CONCAT" | while read -r drop_cmd; do
+      echo "  - Lösche Datenbank: ${drop_cmd}"
+      mysql -e "$drop_cmd" || true
+    done
+    
+    # MySQL-Benutzer bereinigen
+    echo "Bereinige MySQL-Benutzer..."
+    mysql -e "
+      SELECT CONCAT('DROP USER IF EXISTS ''', user, '''@''', host, ''';')
+      FROM mysql.user
+      WHERE user NOT IN ('root', 'mysql.sys', 'debian-sys-maint', 'mysql.infoschema', 'mysql.session')
+    " | grep -v "CONCAT" | while read -r drop_user; do
+      echo "  - Lösche Benutzer: ${drop_user}"
+      mysql -e "$drop_user" || true
+    done
+    
+    # Alle SSL-Zertifikate entfernen
+    echo "Entferne alle SSL-Zertifikate..."
+    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* || true
+    
+    print_success "Vollständiger Reset abgeschlossen"
+  fi
+  
+  # Apache neustarten
+  systemctl restart apache2 || true
+  
+  print_success "Serverbereinigung abgeschlossen (Level: $RESET_LEVEL)"
+}
+
 # Show header
 print_section "WEBSITE ENGINE - SERVER SETUP"
 echo "Dieses Skript richtet die Website Engine Umgebung ein."
@@ -35,6 +133,47 @@ if [ "$(id -u)" -ne 0 ]; then
   print_error "Dieses Skript muss als Root oder mit sudo ausgeführt werden."
   exit 1
 fi
+
+# Frage nach Server-Reset
+print_section "SERVER-RESET OPTION"
+echo "Möchtest du den Server vor der Installation bereinigen?"
+echo "  1) Nein - keine Bereinigung durchführen"
+echo "  2) Minimal - nur Apache-Konfigurationen bereinigen (empfohlen)"
+echo "  3) Standard - Apache-Konfigurationen und SSL-Zertifikate bereinigen"
+echo "  4) Vollständig - Alle Webdaten, Datenbanken und Zertifikate löschen (Vorsicht!)"
+read -r -p "Wähle eine Option [1-4] (Standard: 2): " reset_choice
+
+case ${reset_choice:-2} in
+  1)
+    echo "Überspringe Server-Reset"
+    ;;
+  2)
+    reset_server "minimal"
+    ;;
+  3)
+    echo "⚠️ Warnung: Dies entfernt alle SSL-Zertifikate für Subdomains."
+    read -r -p "Fortfahren? [j/N] " confirm_reset
+    if [[ "$confirm_reset" =~ ^[jJ] ]]; then
+      reset_server "standard"
+    else
+      print_warning "Standard-Reset abgebrochen"
+    fi
+    ;;
+  4)
+    echo "⚠️ ACHTUNG: Dies löscht alle Website-Daten, Datenbanken und Zertifikate!"
+    echo "⚠️ Diese Aktion kann nicht rückgängig gemacht werden!"
+    read -r -p "Wirklich fortfahren? Gib 'RESET' ein um zu bestätigen: " confirm_full_reset
+    if [[ "$confirm_full_reset" == "RESET" ]]; then
+      reset_server "full"
+    else
+      print_warning "Vollständiger Reset abgebrochen"
+    fi
+    ;;
+  *)
+    print_warning "Ungültige Eingabe. Fahre mit minimalem Reset fort."
+    reset_server "minimal"
+    ;;
+esac
 
 # 1. Install required packages
 print_section "Installiere benötigte Pakete"
@@ -98,6 +237,7 @@ ln -sf /opt/website-engine/bin/create-site.sh /usr/local/bin/create-site
 ln -sf /opt/website-engine/bin/delete-site.sh /usr/local/bin/delete-site
 ln -sf /opt/website-engine/bin/direct-ssl.sh /usr/local/bin/direct-ssl
 ln -sf /opt/website-engine/bin/setup-server.sh /usr/local/bin/setup-server
+ln -sf /opt/website-engine/bin/maintenance.sh /usr/local/bin/maintenance
 print_success "Symlinks erstellt"
 
 # 7. Set up environment files
@@ -433,3 +573,35 @@ echo "Passwort: $WP_PASS"
 echo
 
 echo -e "${GREEN}Deine Server-IP ist: $SERVER_IP${NC}"
+
+# Complete
+print_section "INSTALLATION ABGESCHLOSSEN"
+echo "Die Website Engine wurde erfolgreich installiert."
+echo
+echo "Folgende Befehle sind jetzt verfügbar:"
+echo "  create-site <subdomain> - Erstellt eine neue WordPress-Seite"
+echo "  delete-site <subdomain> - Löscht eine WordPress-Seite"
+echo "  direct-ssl <domain>     - Erstellt ein SSL-Zertifikat für eine externe Domain"
+echo "  setup-server            - Richtet den Server neu ein"
+echo "  maintenance.sh          - Führt Wartungsaufgaben durch"
+echo
+echo "Für regelmäßige Wartung (empfohlen):"
+echo "  sudo /opt/website-engine-1.1/bin/maintenance.sh"
+echo "Oder für automatische monatliche Wartung:"
+echo "  sudo crontab -e"
+echo "  Füge hinzu: 0 4 1 * * /opt/website-engine-1.1/bin/maintenance.sh > /var/log/website-engine/maintenance.log 2>&1"
+echo
+echo "Weitere Informationen findest du in der Dokumentation:"
+echo "  /opt/website-engine-1.1/docs/maintenance.md"
+
+# Hinweis zur ersten Website
+print_section "NÄCHSTE SCHRITTE"
+echo "Um deine erste WordPress-Seite zu erstellen, führe aus:"
+echo "  create-site <subdomain>"
+echo
+echo "Beispiel:"
+echo "  create-site kunde1"
+echo
+
+print_success "Website Engine Installation abgeschlossen!"
+exit 0

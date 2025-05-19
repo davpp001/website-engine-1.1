@@ -110,18 +110,50 @@ if [[ $FORCE -eq 0 ]]; then
 fi
 
 # Main process
-echo "🗑️ Lösche WordPress-Seite für Subdomain: $SUBDOMAIN"
-log "INFO" "Beginne Löschvorgang für $SUBDOMAIN.$DOMAIN"
+echo "🗑️ Lösche WordPress-Seite mit Subdomain: $SUBDOMAIN"
 
-# 1) Remove Apache virtual host
-echo "🌐 Entferne Apache vHost..."
-remove_vhost "$SUBDOMAIN" || {
-  log "WARNING" "Fehler beim Entfernen des Apache vHost"
-  echo "⚠️ Warnung: Konnte Apache vHost nicht vollständig entfernen."
-  echo "   Fahre mit dem Löschprozess fort."
+# 1) Identifiziere Apache-Konfigurationen
+echo "🔍 Prüfe auf zugehörige Apache-Konfigurationen..."
+
+# Zähle vorhandene Konfigurationsdateien
+APACHE_CONFIG_COUNT=$(find /etc/apache2/sites-available/ -name "$SUBDOMAIN*.conf" | wc -l)
+APACHE_ENABLED_COUNT=$(find /etc/apache2/sites-enabled/ -name "$SUBDOMAIN*.conf" | wc -l)
+
+if [[ $APACHE_CONFIG_COUNT -eq 0 ]]; then
+  echo "⚠️ Keine Apache-Konfigurationsdateien für $SUBDOMAIN gefunden."
+  echo "   Möglicherweise wurde die Site bereits gelöscht oder existiert nicht."
+  
+  # Wenn kein Zwang, frage nach
+  if [[ $FORCE -eq 0 ]]; then
+    read -p "Trotzdem fortfahren? [j/N] " proceed
+    if [[ ! "$proceed" =~ ^[jJ] ]]; then
+      echo "❌ Abbruch."
+      exit 1
+    fi
+  fi
+else
+  echo "✅ $APACHE_CONFIG_COUNT Apache-Konfigurationsdateien gefunden."
+  if [[ $APACHE_ENABLED_COUNT -gt 0 ]]; then
+    echo "✅ $APACHE_ENABLED_COUNT aktivierte Apache-Sites gefunden."
+  fi
+fi
+
+# 2) Entferne Apache vHost-Konfiguration
+echo "🗑️ Entferne Apache-Konfiguration..."
+remove_vhost "$SUBDOMAIN"
+
+# 3) Bereinige alle temporären Konfigurationen (als zusätzliche Sicherheit)
+echo "🧹 Bereinige temporäre Konfigurationen..."
+rm -f /etc/apache2/sites-available/$SUBDOMAIN-temp-le-ssl.conf 2>/dev/null || true
+rm -f /etc/apache2/sites-available/$SUBDOMAIN-le-ssl.conf 2>/dev/null || true
+
+# Apache neuladen, um sicherzustellen, dass keine ungültigen Konfigurationen verbleiben
+systemctl reload apache2 || {
+  echo "⚠️ Apache konnte nicht neu geladen werden."
 }
 
-# 2) Uninstall WordPress
+# 4) Entferne WordPress-Installation
+echo "🗑️ Entferne WordPress-Installation..."
 if [[ $KEEP_DB -eq 1 ]]; then
   # Nur WordPress-Dateien löschen, Datenbank behalten
   echo "🗑️ Entferne nur WordPress-Dateien, behalte Datenbank..."

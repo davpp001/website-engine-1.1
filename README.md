@@ -7,6 +7,8 @@ Eine schlanke Anwendung zum Erstellen und Löschen von WordPress-Subdomains mit 
 - Erstellen einer neuen Subdomain mit WordPress-Installation
 - Löschen einer bestehenden Subdomain mit WordPress-Installation
 - Server-Setup mit allen notwendigen Komponenten
+- Automatische Serverbereinigung beim Setup (verhindert verwaiste Konfigurationen)
+- Regelmäßige Server-Wartung und Überprüfung auf verwaiste Konfigurationen
 - Backup-System (MySQL, Restic S3)
 
 ## Installation
@@ -17,10 +19,16 @@ Eine schlanke Anwendung zum Erstellen und Löschen von WordPress-Subdomains mit 
    cd website-engine-2.0/simplified
    ```
 
-2. Führe das Server-Setup aus:
+2. Führe das Server-Setup aus (mit integrierter Bereinigungsoption):
    ```
    sudo ./bin/setup-server.sh
    ```
+   
+   Während des Setups kannst du eine von vier Bereinigungsoptionen wählen:
+   - Keine Bereinigung
+   - Minimale Bereinigung (empfohlen) - entfernt verwaiste Apache-Konfigurationen
+   - Standard-Bereinigung - entfernt Apache-Konfigurationen und SSL-Zertifikate
+   - Vollständige Bereinigung - entfernt alle Webdaten, Datenbanken und Zertifikate
 
 3. Konfiguriere deine Cloudflare-Anmeldedaten:
    ```
@@ -65,15 +73,28 @@ delete-site kundename
 ```
 
 Dies:
-- Entfernt die Apache-Konfiguration
-- Löscht die WordPress-Installation und Datenbank
-- Entfernt den DNS-Eintrag
+- Löscht den DNS-Eintrag bei Cloudflare
+- Entfernt den Apache vHost und SSL-Zertifikate
+- Löscht die WordPress-Installation und die zugehörige Datenbank
+- Bereinigt alle temporären Konfigurationsdateien
 
-### DNS-Eintrag beibehalten
+### Server-Wartung
 
 ```bash
-delete-site kundename --keep-dns
+sudo maintenance
 ```
+
+Das Wartungsskript führt folgende Aufgaben aus:
+- Überprüft auf verwaiste Apache-Konfigurationen (z.B. mit nicht existierenden DocumentRoot-Verzeichnissen)
+- Entfernt temporäre Let's Encrypt Konfigurationsdateien
+- Prüft auf Konsistenz zwischen WordPress-Installationen und Apache-Konfigurationen
+
+Um nur zu prüfen, ohne Änderungen vorzunehmen:
+```bash
+sudo maintenance --check-only
+```
+
+Für optimale Serverstabilität wird empfohlen, das Wartungsskript regelmäßig (z.B. monatlich) auszuführen.
 
 ### SSL-Zertifikat separat einrichten
 

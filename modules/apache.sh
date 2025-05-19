@@ -25,6 +25,36 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/config.sh"
 
+# Hilfsfunktion zum Aufräumen von Apache-Konfigurationen
+# Usage: cleanup_apache_configs <subdomain>
+function cleanup_apache_configs() {
+  local SUB="$1"
+  local PATTERNS=("$SUB.conf" "$SUB-le-ssl.conf" "$SUB-temp-le-ssl.conf")
+  
+  log "INFO" "Bereinige Apache-Konfigurationen für $SUB"
+  
+  # Deaktiviere alle Sites, die das Muster enthalten
+  for pattern in "${PATTERNS[@]}"; do
+    sudo a2dissite "*$pattern" &>/dev/null || true
+  done
+  
+  # Entferne alle Konfigurationsdateien, die das Muster enthalten
+  for pattern in "${PATTERNS[@]}"; do
+    for config in /etc/apache2/sites-available/*"$pattern"; do
+      if [[ -f "$config" ]]; then
+        log "INFO" "Entferne Apache-Konfiguration: $config"
+        sudo rm -f "$config"
+      fi
+    done
+  done
+  
+  # Reload Apache, um Änderungen zu übernehmen
+  sudo systemctl reload apache2 || log "WARNING" "Apache konnte nicht neu geladen werden"
+  
+  log "SUCCESS" "Apache-Konfigurationen für $SUB bereinigt"
+  return 0
+}
+
 # SSL-Zertifikat mit certbot --apache erstellen
 # Usage: create_ssl_cert <domain> [document-root]
 function create_ssl_cert() {
@@ -591,30 +621,24 @@ function setup_vhost() {
 # Usage: remove_vhost <subdomain-name>
 function remove_vhost() {
   local SUB="$1"
-  local VHOST_CONFIG="${APACHE_SITES_DIR}/${SUB}.conf"
   
   log "INFO" "Entferne Apache vHost für $SUB"
   
-  # 1. Deaktiviere vHost mit a2dissite
-  local site_enabled=0
-  if [[ -f "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
-    site_enabled=1
-  fi
+  # Nutze die cleanup-Funktion, um alle zugehörigen Konfigurationen zu entfernen
+  cleanup_apache_configs "$SUB"
   
-  if [[ $site_enabled -eq 1 ]]; then
-    sudo a2dissite "${SUB}.conf" > /dev/null 2>&1 || {
-      log "WARNING" "Konnte vHost nicht deaktivieren mit a2dissite, versuche trotzdem fortzufahren"
-    }
-  else 
-    log "INFO" "vHost ist bereits deaktiviert"
-  fi
+  # Entferne alle temporären Let's Encrypt-Dateien für die Domain
+  local LE_TEMP_FILES=(
+    "/etc/apache2/sites-available/${SUB}-le-ssl.conf"
+    "/etc/apache2/sites-available/${SUB}-temp-le-ssl.conf"
+  )
   
-  # 2. Entferne Konfigurationsdatei
-  if [[ -f "$VHOST_CONFIG" ]]; then
-    sudo rm -f "$VHOST_CONFIG" || {
-      log "WARNING" "Konnte vHost-Konfiguration nicht löschen: $VHOST_CONFIG"
-    }
-    log "INFO" "vHost-Konfiguration gelöscht: $VHOST_CONFIG"
+  for temp_file in "${LE_TEMP_FILES[@]}"; do
+    if [[ -f "$temp_file" ]]; then
+      log "INFO" "Entferne temporäre Let's Encrypt-Konfiguration: $temp_file"
+      sudo rm -f "$temp_file"
+    fi
+  done
   else
     log "INFO" "vHost-Konfiguration existiert nicht: $VHOST_CONFIG"
   fi
