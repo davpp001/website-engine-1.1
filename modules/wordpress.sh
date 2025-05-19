@@ -267,6 +267,20 @@ PHP
     return 1
   fi
   
+  # Überprüfe, ob Konstanten bereits definiert sind, bevor sie hinzugefügt werden
+  if ! grep -q "define('DISALLOW_FILE_EDIT'" "$DOCROOT/wp-config.php"; then
+    echo "define('DISALLOW_FILE_EDIT', true);" | sudo -u www-data tee -a "$DOCROOT/wp-config.php" > /dev/null
+  fi
+  if ! grep -q "define('WP_POST_REVISIONS'" "$DOCROOT/wp-config.php"; then
+    echo "define('WP_POST_REVISIONS', 5);" | sudo -u www-data tee -a "$DOCROOT/wp-config.php" > /dev/null
+  fi
+  if ! grep -q "define('AUTOMATIC_UPDATER_DISABLED'" "$DOCROOT/wp-config.php"; then
+    echo "define('AUTOMATIC_UPDATER_DISABLED', false);" | sudo -u www-data tee -a "$DOCROOT/wp-config.php" > /dev/null
+  fi
+  if ! grep -q "define('WP_AUTO_UPDATE_CORE'" "$DOCROOT/wp-config.php"; then
+    echo "define('WP_AUTO_UPDATE_CORE', 'minor');" | sudo -u www-data tee -a "$DOCROOT/wp-config.php" > /dev/null
+  fi
+  
   # 4. WordPress installieren
   log "INFO" "Führe WordPress-Installation durch"
   

@@ -151,6 +151,26 @@ else
   fi
 fi
 
+# Verbesserte DNS-Propagation-Checks
+DNS_OK=0
+for dns_try in {1..10}; do
+  echo "🌐 [Versuch $dns_try/10] Überprüfe DNS-Propagation für ${SUB}.${DOMAIN}"
+  if dig +short "${SUB}.${DOMAIN}" | grep -q "$(curl -s ifconfig.me)"; then
+    DNS_OK=1
+    echo "✅ DNS-Propagation erfolgreich."
+    break
+  else
+    echo "⚠️ DNS-Propagation noch nicht abgeschlossen. Warte 60 Sekunden..."
+    sleep 60
+  fi
+
+done
+
+if [[ $DNS_OK -eq 0 ]]; then
+  echo "❌ DNS-Propagation nach 10 Versuchen fehlgeschlagen. Breche ab."
+  exit 1
+fi
+
 # 2) Setup Apache virtual host (HTTP)
 echo "🌐 Erstelle Apache vHost..."
 setup_vhost "$SUB" || {
@@ -162,7 +182,7 @@ setup_vhost "$SUB" || {
   exit 1
 }
 
-# 3) SSL-Zertifikat erstellen (bis zu 3 Versuche, sonst Abbruch)
+# 3) SSL-Zertifikat erstellen (bis zu 3 Versuche, sonst Fallback)
 SSL_OK=0
 for ssl_try in {1..3}; do
   echo "🔐 [Versuch $ssl_try/3] Erstelle und installiere SSL-Zertifikat mit certbot --apache"
@@ -174,13 +194,24 @@ for ssl_try in {1..3}; do
     sleep 30
   fi
 done
+
+# Fallback-Mechanismus für SSL-Zertifikate
 if [[ $SSL_OK -eq 0 ]]; then
-  echo "❌ SSL-Installation nach 3 Versuchen fehlgeschlagen. Breche ab."
-  remove_vhost "$SUB"
-  if [[ $TEST_MODE -eq 0 ]]; then
-    delete_subdomain "$SUB"
+  echo "❌ SSL-Installation mit Let's Encrypt fehlgeschlagen. Versuche Fallback-Option."
+  if sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "/etc/ssl/private/${SUB}.${DOMAIN}.key" \
+    -out "/etc/ssl/certs/${SUB}.${DOMAIN}.crt" \
+    -subj "/CN=${SUB}.${DOMAIN}"; then
+    echo "✅ Selbstsigniertes SSL-Zertifikat erfolgreich erstellt."
+    SSL_OK=1
+  else
+    echo "❌ Fallback-SSL-Installation fehlgeschlagen. Breche ab."
+    remove_vhost "$SUB"
+    if [[ $TEST_MODE -eq 0 ]]; then
+      delete_subdomain "$SUB"
+    fi
+    exit 1
   fi
-  exit 1
 fi
 
 # 4) Apache vHost auf HTTPS umstellen (optional, falls nötig)
