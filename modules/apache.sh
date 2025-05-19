@@ -369,13 +369,16 @@ function create_vhost_config() {
 # HTTP -> HTTPS Redirect
 <VirtualHost *:80>
   ServerName ${FQDN}
+  # Stellt sicher, dass diese Site Vorrang vor anderen hat
+  ServerAlias ${FQDN} www.${FQDN}
   ServerAdmin ${WP_EMAIL}
   ServerSignature Off
   
   ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
   CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
   
-  Redirect permanent / https://${FQDN}/
+  # Diese Zeile stellt sicher, dass die Umleitung immer funktioniert
+  RedirectMatch 301 ^(?!/\.well-known/acme-challenge/).* https://${FQDN}$0
 </VirtualHost>
 
 # HTTPS VirtualHost
@@ -479,6 +482,13 @@ VHOST_EOF
     log "ERROR" "Konnte vHost nicht aktivieren"
     return 1
   }
+  
+  # Zusätzliche Prüfung: Stelle sicher, dass die Default-Site deaktiviert wird,
+  # wenn sie mit unserer neuen Site kollidieren könnte
+  if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
+    log "INFO" "Default-Site könnte Konflikte verursachen, deaktiviere sie"
+    sudo a2dissite 000-default > /dev/null 2>&1 || log "WARNING" "Konnte Default-Site nicht deaktivieren"
+  fi
   
     if grep -q "SSLCertificateFile" "$VHOST_CONFIG"; then
     # Nur prüfen, wenn es sich um eine SSL-Konfiguration handelt

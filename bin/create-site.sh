@@ -339,6 +339,23 @@ if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
   echo "✅ Site wurde erfolgreich aktiviert"
 fi
 
+# Deaktiviere die Default-Site, wenn sie noch aktiv ist
+if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
+  echo "⚠️ Apache Default-Site ist aktiv und kann Konflikte verursachen. Wird deaktiviert..."
+  sudo a2dissite 000-default > /dev/null 2>&1
+  echo "✅ Default-Site wurde deaktiviert"
+fi
+
+# Überprüfe, ob es konkurrierende VirtualHosts für *:80 gibt
+competing_sites=$(grep -l "VirtualHost \*:80" /etc/apache2/sites-enabled/* | grep -v "${SUB}.conf" || true)
+if [[ -n "$competing_sites" ]]; then
+  echo "⚠️ Warnung: Folgende Sites könnten mit Ihrer neuen Site konkurrieren:"
+  for site in $competing_sites; do
+    echo "   - $site"
+  done
+  echo "   Überprüfen Sie die ServerName-Direktiven in diesen Dateien."
+fi
+
 # Zeige Apache-Status an (Debug)
 echo "📋 Apache-Konfigurationsstatus:"
 echo " - Verfügbare Sites: $(ls -la /etc/apache2/sites-available/${SUB}*.conf 2>/dev/null || echo 'Keine Konfiguration gefunden')"
