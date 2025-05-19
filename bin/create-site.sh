@@ -2,18 +2,19 @@
 set -euo pipefail
 
 # ====================================================================
-# NEUE WORDPRESS-SITE ERSTELLEN
+# NEUE WORDPRESS-SITE ERSTELLEN (OPTIMIERT)
 # ====================================================================
 #
 # Dieses Skript erstellt eine neue WordPress-Site mit SSL-Zertifikat.
-# Für die SSL-Installation wird ausschließlich das 'certbot --apache'
-# Plugin verwendet, da es die zuverlässigste Methode ist.
+# Es nutzt automatisch das Wildcard-Zertifikat, wenn verfügbar.
 #
 # VERWENDUNG:
-#   create-site <subdomain> [--test]
+#   create-site <subdomain> [--test] [--force-ssl]
 #
 # OPTIONEN:
-#   --test    Überspringt die DNS-Erstellung und -Überprüfung
+#   --test        Überspringt die DNS-Erstellung und -Überprüfung
+#   --force-ssl   Erzwingt die Erstellung eines eigenen SSL-Zertifikats
+#                 anstatt das Wildcard-Zertifikat zu verwenden
 #
 # BEISPIEL:
 #   create-site kunde1       # Erstellt kunde1.s-neue.website mit SSL
@@ -44,13 +45,14 @@ source "${MODULE_DIR}/wordpress.sh"
 
 # Show usage
 usage() {
-  echo "Verwendung: $0 <subdomain-name> [--test]"
+  echo "Verwendung: $0 <subdomain-name> [--test] [--force-ssl]"
   echo
   echo "Erstellt eine neue WordPress-Seite für die angegebene Subdomain."
   echo
   echo "Optionen:"
-  echo "  --test    Testmodus (DNS-Überprüfung überspringen)"
-  echo "  --help    Diese Hilfe anzeigen"
+  echo "  --test        Testmodus (DNS-Überprüfung überspringen)"
+  echo "  --force-ssl   Erzwinge ein eigenes SSL-Zertifikat (statt Wildcard)"
+  echo "  --help        Diese Hilfe anzeigen"
   echo
   echo "Beispiele:"
   echo "  $0 kunde1         # Erstellt kunde1.$DOMAIN mit WordPress"
@@ -63,11 +65,16 @@ log "INFO" "===== ERSTELLE NEUE WORDPRESS-SITE ====="
 # Parse arguments
 SUBDOMAIN=""
 TEST_MODE=0
+FORCE_SSL=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --test)
       TEST_MODE=1
+      shift
+      ;;
+    --force-ssl)
+      FORCE_SSL=1
       shift
       ;;
     --help)
@@ -122,56 +129,119 @@ else
     echo "Bitte führe aus: source /etc/profile.d/cloudflare.sh"
     exit 1
   fi
+  
   echo "🌐 Erstelle Cloudflare DNS-Eintrag..."
   SUB=$(create_subdomain "$SUBDOMAIN") || {
     echo "❌ Konnte DNS-Eintrag nicht erstellen"
     exit 1
   }
-  # Zwingend auf DNS-Propagation warten (bis zu 10 Minuten)
-  MAX_DNS_CHECKS=40
-  DNS_WAIT_SECONDS=15
+  
+  # Optimierte DNS-Propagation-Prüfung
+  # 1. Zuerst direkt bei Cloudflare prüfen
+  echo "🌐 Prüfe DNS-Eintrag direkt bei Cloudflare..."
+  
+  if [[ -n "${CF_API_TOKEN:-}" && -n "${ZONE_ID:-}" ]]; then
+    cf_response=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records" \
+      -H "Authorization: Bearer ${CF_API_TOKEN}" \
+      -H "Content-Type: application/json" | jq -r --arg fqdn "${SUB}.${DOMAIN}" '.result[] | select(.name==$fqdn and .type=="A")')
+    
+    if [[ -n "$cf_response" ]]; then
+      echo "✅ DNS-Eintrag in Cloudflare API bestätigt!"
+    else
+      echo "⚠️ DNS-Eintrag in Cloudflare API nicht gefunden. Überprüfe Einstellungen."
+    fi
+  fi
+  
+  # 2. Auf DNS-Propagation warten mit abgestufter Strategie
+  echo "🌐 Prüfe DNS-Propagation..."
   DNS_CHECK_PASSED=0
-  for ((i=1; i<=MAX_DNS_CHECKS; i++)); do
-    echo -n "DNS-Prüfung $i von $MAX_DNS_CHECKS: "
-    if host "${SUB}.${DOMAIN}" &>/dev/null || dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
-      echo "✅ Erfolgreich!"
+  
+  # Versuch 1: Direkt gegen Cloudflare DNS-Server prüfen (schnell und direkt)
+  for i in {1..3}; do
+    echo -n "DNS-Prüfung (CF-Direkt) $i von 3: "
+    if dig @1.1.1.1 +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
+      echo "✅ Erfolgreich gegen Cloudflare DNS!"
       DNS_CHECK_PASSED=1
       break
     else
-      echo "⏳ Noch nicht verfügbar, warte $DNS_WAIT_SECONDS Sekunden..."
-      sleep $DNS_WAIT_SECONDS
+      echo "⏳ Noch nicht verfügbar, warte 5 Sekunden..."
+      sleep 5
     fi
   done
+  
+  # Versuch 2: Lokaler DNS-Resolver (z.B. vom ISP oder lokalen Cache)
   if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
-    echo "❌ DNS-Propagation konnte nach $((MAX_DNS_CHECKS*DNS_WAIT_SECONDS/60)) Minuten nicht verifiziert werden. Breche ab."
-    delete_subdomain "$SUB"
-    exit 1
+    for i in {1..3}; do
+      echo -n "DNS-Prüfung (Lokal) $i von 3: "
+      if dig +short "${SUB}.${DOMAIN}" | grep -q "[0-9]"; then
+        echo "✅ Erfolgreich gegen lokalen DNS!"
+        DNS_CHECK_PASSED=1
+        break
+      else
+        echo "⏳ Noch nicht verfügbar, warte 10 Sekunden..."
+        sleep 10
+      fi
+    done
+  fi
+  
+  # Versuch 3: Verschiedene Lookup-Methoden mit längeren Pausen
+  if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
+    for i in {1..3}; do
+      echo -n "DNS-Prüfung (Alternativ) $i von 3: "
+      if host "${SUB}.${DOMAIN}" &>/dev/null || nslookup "${SUB}.${DOMAIN}" &>/dev/null; then
+        echo "✅ Erfolgreich mit alternativen DNS-Tools!"
+        DNS_CHECK_PASSED=1
+        break
+      else
+        echo "⏳ Noch nicht verfügbar, warte 15 Sekunden..."
+        sleep 15
+      fi
+    done
+  fi
+  
+  # Fortfahren, auch wenn die DNS-Propagation noch nicht überall bestätigt wurde
+  if [[ $DNS_CHECK_PASSED -eq 0 ]]; then
+    echo "⚠️ DNS-Propagation konnte nicht vollständig verifiziert werden."
+    echo "Wir vertrauen auf den Cloudflare-Eintrag und fahren fort. Dies kann zu temporären SSL-Problemen führen."
   else
-    echo "✅ DNS-Propagation verifiziert! Fahre mit SSL-Setup fort."
+    echo "✅ DNS-Propagation verifiziert! Fahre mit der Installation fort."
   fi
 fi
 
-# Verbesserte DNS-Propagation-Checks
-DNS_OK=0
-for dns_try in {1..10}; do
-  echo "🌐 [Versuch $dns_try/10] Überprüfe DNS-Propagation für ${SUB}.${DOMAIN}"
-  if dig +short "${SUB}.${DOMAIN}" | grep -q "$(curl -s ifconfig.me)"; then
-    DNS_OK=1
-    echo "✅ DNS-Propagation erfolgreich."
-    break
+# 2) Prüfe auf vorhandenes Wildcard-Zertifikat
+SSL_OK=0
+if [[ $FORCE_SSL -eq 0 ]]; then
+  echo "🔐 Prüfe auf vorhandenes Wildcard-Zertifikat..."
+  
+  # Wildcard-Zertifikat verwenden, wenn vorhanden
+  if [[ -f "$SSL_CERT_PATH" ]]; then
+    if openssl x509 -in "$SSL_CERT_PATH" -text | grep -q "DNS:\*\.$DOMAIN"; then
+      echo "✅ Wildcard-Zertifikat für *.$DOMAIN gefunden!"
+      
+      # Prüfe Ablaufdatum
+      cert_end_date=$(openssl x509 -in "$SSL_CERT_PATH" -noout -enddate | cut -d= -f2)
+      cert_end_epoch=$(date -d "$cert_end_date" +%s 2>/dev/null || date -j -f "%b %d %H:%M:%S %Y %Z" "$cert_end_date" +%s 2>/dev/null)
+      now_epoch=$(date +%s)
+      days_left=$(( (cert_end_epoch - now_epoch) / 86400 ))
+      
+      if [[ $days_left -lt 0 ]]; then
+        echo "⚠️ Wildcard-Zertifikat ist abgelaufen! Erstelle ein neues Zertifikat."
+      elif [[ $days_left -lt 15 ]]; then
+        echo "⚠️ Wildcard-Zertifikat läuft in $days_left Tagen ab. Bald erneuern!"
+        SSL_OK=1
+      else
+        echo "✅ Wildcard-Zertifikat ist gültig für weitere $days_left Tage."
+        SSL_OK=1
+      fi
+    else
+      echo "⚠️ Zertifikat gefunden, ist aber kein Wildcard-Zertifikat."
+    fi
   else
-    echo "⚠️ DNS-Propagation noch nicht abgeschlossen. Warte 60 Sekunden..."
-    sleep 60
+    echo "⚠️ Kein Wildcard-Zertifikat gefunden."
   fi
-
-done
-
-if [[ $DNS_OK -eq 0 ]]; then
-  echo "❌ DNS-Propagation nach 10 Versuchen fehlgeschlagen. Breche ab."
-  exit 1
 fi
 
-# 2) Setup Apache virtual host (HTTP)
+# 3) Setup Apache virtual host
 echo "🌐 Erstelle Apache vHost..."
 
 # Stelle sicher, dass keine verwaisten Konfigurationen für diese Subdomain existieren
@@ -180,64 +250,79 @@ if type cleanup_apache_configs &>/dev/null; then
   cleanup_apache_configs "$SUB"
 fi
 
-setup_vhost "$SUB" || {
-  echo "❌ Fehler beim Erstellen des Apache vHost."
-  if [[ $TEST_MODE -eq 0 ]]; then
-    echo "🧹 Bereinige DNS-Einträge..."
-    delete_subdomain "$SUB"
+# Wenn Wildcard-SSL verfügbar ist, erstelle direkt mit SSL
+if [[ $SSL_OK -eq 1 ]]; then
+  echo "🔐 Verwende vorhandenes Wildcard-Zertifikat..."
+  create_vhost_config "$SUB" || {
+    echo "❌ Fehler beim Erstellen des Apache vHost."
+    if [[ $TEST_MODE -eq 0 ]]; then
+      echo "🧹 Bereinige DNS-Einträge..."
+      delete_subdomain "$SUB"
+    fi
+    exit 1
+  }
+else
+  # Ansonsten erstelle zunächst den HTTP-vHost
+  setup_vhost "$SUB" || {
+    echo "❌ Fehler beim Erstellen des Apache vHost."
+    if [[ $TEST_MODE -eq 0 ]]; then
+      echo "🧹 Bereinige DNS-Einträge..."
+      delete_subdomain "$SUB"
+    fi
+    exit 1
+  }
+  
+  # Nur wenn wir kein Wildcard-Zertifikat haben oder --force-ssl gesetzt wurde
+  if [[ $SSL_OK -eq 0 ]]; then
+    # SSL-Zertifikat erstellen (bis zu 2 Versuche)
+    for ssl_try in {1..2}; do
+      echo "🔐 [Versuch $ssl_try/2] Erstelle und installiere SSL-Zertifikat mit certbot --apache"
+      if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}"; then
+        SSL_OK=1
+        break
+      else
+        echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Warte 10 Sekunden und versuche es noch einmal..."
+        sleep 10
+      fi
+    done
   fi
-  exit 1
-}
+fi
 
-# 3) SSL-Zertifikat erstellen (bis zu 3 Versuche, sonst Fallback)
-SSL_OK=0
-for ssl_try in {1..3}; do
-  echo "🔐 [Versuch $ssl_try/3] Erstelle und installiere SSL-Zertifikat mit certbot --apache"
-  if sudo certbot --apache -n --agree-tos --email "$SSL_EMAIL" -d "${SUB}.${DOMAIN}"; then
-    SSL_OK=1
-    break
-  else
-    echo "⚠️ SSL-Installation mit certbot fehlgeschlagen. Warte 30 Sekunden und versuche es erneut..."
-    sleep 30
-  fi
-done
-
-# Fallback-Mechanismus für SSL-Zertifikate
-if [[ $SSL_OK -eq 0 ]]; then
-  echo "❌ SSL-Installation mit Let's Encrypt fehlgeschlagen. Versuche Fallback-Option."
-  if sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout "/etc/ssl/private/${SUB}.${DOMAIN}.key" \
-    -out "/etc/ssl/certs/${SUB}.${DOMAIN}.crt" \
-    -subj "/CN=${SUB}.${DOMAIN}"; then
-    echo "✅ Selbstsigniertes SSL-Zertifikat erfolgreich erstellt."
-    SSL_OK=1
-  else
-    echo "❌ Fallback-SSL-Installation fehlgeschlagen. Breche ab."
+# Wenn SSL aktiviert ist, erfolgt die Installation von WordPress
+if [[ $SSL_OK -eq 1 ]]; then
+  echo "📦 Installiere WordPress..."
+  install_wordpress "$SUB" || {
+    echo "❌ Fehler bei der WordPress-Installation."
+    echo "🧹 Bereinige vHost und DNS-Einträge..."
     remove_vhost "$SUB"
     if [[ $TEST_MODE -eq 0 ]]; then
       delete_subdomain "$SUB"
     fi
     exit 1
-  fi
+  }
+else
+  echo "⚠️ SSL konnte nicht konfiguriert werden, fahre trotzdem mit HTTP fort."
+  echo "📦 Installiere WordPress..."
+  install_wordpress "$SUB" || {
+    echo "❌ Fehler bei der WordPress-Installation."
+    echo "🧹 Bereinige vHost und DNS-Einträge..."
+    remove_vhost "$SUB"
+    if [[ $TEST_MODE -eq 0 ]]; then
+      delete_subdomain "$SUB"
+    fi
+    exit 1
+  }
 fi
 
-# 4) Apache vHost auf HTTPS umstellen (optional, falls nötig)
-# ...hier ggf. weitere Optimierung möglich...
-
-# 5) Install WordPress (nur wenn SSL erfolgreich)
-echo "📦 Installiere WordPress..."
-install_wordpress "$SUB" || {
-  echo "❌ Fehler bei der WordPress-Installation."
-  echo "🧹 Bereinige vHost und DNS-Einträge..."
-  remove_vhost "$SUB"
-  if [[ $TEST_MODE -eq 0 ]]; then
-    delete_subdomain "$SUB"
-  fi
-  exit 1
-}
-
 # Complete
-FINAL_URL="https://$SUB.$DOMAIN"
+if [[ $SSL_OK -eq 1 ]]; then
+  FINAL_URL="https://$SUB.$DOMAIN"
+  SSL_STATUS="Aktiv"
+else
+  FINAL_URL="http://$SUB.$DOMAIN"
+  SSL_STATUS="Inaktiv - Bitte manuell einrichten"
+fi
+
 echo
 echo "✅ Neue WordPress-Seite erfolgreich erstellt!"
 echo "-------------------------------------------"
@@ -245,7 +330,7 @@ echo "🌐 Website:      $FINAL_URL"
 echo "🔑 Admin-Login:  $FINAL_URL/wp-admin/"
 echo "👤 Benutzer:     $WP_USER"
 echo "🔒 Passwort:     $WP_PASS"
-echo "📌 SSL:          Aktiv"
+echo "📌 SSL:          $SSL_STATUS"
 echo "-------------------------------------------"
 echo "Die Anmeldedaten wurden in $CONFIG_DIR/sites/$SUB/ gespeichert"
 echo
