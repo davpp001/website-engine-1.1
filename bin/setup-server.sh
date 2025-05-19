@@ -111,22 +111,31 @@ read -r setup_cloudflare
 if [[ "$setup_cloudflare" =~ ^[jJ] ]]; then
   echo "Bitte gib deinen Cloudflare API-Token ein:"
   read -r cf_token
-  
+
   echo "Bitte gib deine Cloudflare Zone-ID ein:"
   read -r zone_id
-  
+
   # Werte speichern
   cat > /etc/profile.d/cloudflare.sh << EOF
 export CF_API_TOKEN="$cf_token"
 export ZONE_ID="$zone_id"
 EOF
   chmod +x /etc/profile.d/cloudflare.sh
-  
+
   # Umgebungsvariablen sofort laden
   export CF_API_TOKEN="$cf_token"
   export ZONE_ID="$zone_id"
-  
+
   print_success "Cloudflare-Konfiguration gespeichert und geladen"
+
+  # Automatische Erstellung der Cloudflare-Zugangsdaten-Datei
+  mkdir -p /etc/letsencrypt/cloudflare
+  cat > /etc/letsencrypt/cloudflare.ini << EOF
+# Cloudflare API credentials
+dns_cloudflare_api_token = $cf_token
+EOF
+  chmod 600 /etc/letsencrypt/cloudflare.ini
+  print_success "Cloudflare-Zugangsdaten erstellt"
 else
   # Standard-Template erstellen
   cat > /etc/profile.d/cloudflare.sh << EOF
@@ -251,50 +260,15 @@ print_success "Backup-Skripte kopiert"
 source "/opt/website-engine/modules/config.sh"
 
 print_section "Backup-Konfiguration"
-echo "Möchtest du jetzt die Backup-Systeme konfigurieren? (j/n)"
-read -r setup_backup
-
-if [[ "$setup_backup" =~ ^[jJ] ]]; then
-  # Prüfen, ob die Funktion verfügbar ist
-  if type configure_backup_systems &>/dev/null; then
-    configure_backup_systems
-    print_success "Backup-Systeme wurden konfiguriert"
-  else
-    print_warning "Die Funktion configure_backup_systems wurde nicht gefunden."
-    print_warning "Möglicherweise wird eine ältere Version von config.sh verwendet."
-    
-    # Erstelle IONOS-Konfigurationsdatei aus Template
-    if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
-      cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
-      chmod 600 /etc/website-engine/backup/ionos.env
-      print_success "IONOS-Konfigurationsvorlage erstellt"
-    else 
-      print_warning "IONOS-Template nicht gefunden. Erstelle leere Konfiguration"
-      cat > /etc/website-engine/backup/ionos.env << 'EOF'
-# IONOS Cloud API Konfiguration
-IONOS_TOKEN=""
-IONOS_SERVER_ID=""
-IONOS_VOLUME_ID=""
-EOF
-      chmod 600 /etc/website-engine/backup/ionos.env
-    fi
-
-    # Erstelle Restic-Konfigurationsdatei
-    cat > /etc/website-engine/backup/restic.env << 'EOF'
-# Restic configuration
-export RESTIC_REPOSITORY=""  # z.B. s3:https://s3.eu-central-3.ionoscloud.com/my-backups
-export RESTIC_PASSWORD=""    # Ein sicheres Passwort für die Repository-Verschlüsselung
-export AWS_ACCESS_KEY_ID=""  # S3 Access Key
-export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
-EOF
-    chmod 600 /etc/website-engine/backup/restic.env
-    
-    print_warning "Die Backup-Konfigurationsdateien wurden erstellt, müssen aber manuell bearbeitet werden."
-  fi
+if [[ -f "/etc/website-engine/backup/ionos.env" || -f "/etc/website-engine/backup/restic.env" ]]; then
+  echo "Backup-Konfiguration erkannt. Möchtest du sie erneuern? (j/n)"
+  read -r renew_backup
 else
-  # Erstelle leere Konfigurationsdateien für spätere Verwendung
-  print_warning "Backup-Systeme werden nicht jetzt konfiguriert."
-  
+  renew_backup="j"
+fi
+
+if [[ "$renew_backup" =~ ^[jJ] ]]; then
+  echo "Erneuere Backup-Konfiguration..."
   # Erstelle IONOS-Konfigurationsdatei aus Template
   if [[ -f "$BASE_DIR/backup/ionos.env.template" ]]; then
     cp "$BASE_DIR/backup/ionos.env.template" /etc/website-engine/backup/ionos.env
@@ -320,32 +294,9 @@ export AWS_ACCESS_KEY_ID=""  # S3 Access Key
 export AWS_SECRET_ACCESS_KEY="" # S3 Secret Key
 EOF
   chmod 600 /etc/website-engine/backup/restic.env
-  print_warning "Du kannst die Backup-Systeme später über die Backup-Skripte konfigurieren."
-fi
-
-# Erstelle Symlinks für Backup-Befehle
-ln -sf /opt/website-engine/backup/backup-all.sh /usr/local/bin/website-backup
-ln -sf /opt/website-engine/backup/restore.sh /usr/local/bin/website-restore
-ln -sf /opt/website-engine/backup/secrets-encrypt.sh /usr/local/bin/website-secrets
-print_success "Backup-Befehlssymlinks erstellt"
-
-# Setup cron jobs
-print_section "Richte Cron-Jobs ein"
-(crontab -l 2>/dev/null || true; echo "0 3 * * * /opt/website-engine/backup/backup-all.sh --mysql") | crontab -
-(crontab -l 2>/dev/null || true; echo "0 1 * * * /opt/website-engine/backup/ionos-snapshot.sh") | crontab -
-(crontab -l 2>/dev/null || true; echo "30 2 * * * /opt/website-engine/backup/backup-all.sh --restic") | crontab -
-print_success "Cron-Jobs eingerichtet"
-
-# Verschlüsselung für sensible Dateien anbieten
-print_section "Sichere Konfiguration"
-echo "Möchten Sie sensible Konfigurationsdateien verschlüsseln? (j/n)"
-read -r response
-if [[ "$response" =~ ^[jJyY] ]]; then
-  echo "Starte Verschlüsselung mit website-secrets..."
-  /usr/local/bin/website-secrets encrypt
-  print_success "Verschlüsselung abgeschlossen"
+  print_success "Restic-Konfigurationsdatei erstellt"
 else
-  print_warning "Konfigurationsdateien wurden nicht verschlüsselt. Sie können dies später mit 'website-secrets encrypt' nachholen."
+  print_warning "Backup-Konfiguration wurde nicht erneuert. Bestehende Konfiguration bleibt erhalten."
 fi
 
 # 10. Final check
