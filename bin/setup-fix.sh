@@ -1,12 +1,13 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =========================================================================
 # Website Engine - Setup Fix Script
 # =========================================================================
-# Dieses Skript korrigiert Probleme im ursprünglichen setup-server.sh
-# und stellt sicher, dass der Server-Setup vollständig durchläuft.
+# Dieses Skript korrigiert Probleme im ursprünglichen setup-server.sh,
+# stellt SSL-Zertifikate wieder her und stellt sicher, dass der 
+# Server-Setup vollständig durchläuft.
 #
 # Autor: GitHub Copilot
-# Datum: 20. Mai 2025
+# Datum: 22. Juni 2024
 # =========================================================================
 
 # Farben für bessere Lesbarkeit
@@ -95,6 +96,11 @@ install_minimal_required_components() {
   ln -sf /opt/website-engine/bin/delete-site.sh /usr/local/bin/delete-site 2>/dev/null || true
   ln -sf /opt/website-engine/bin/direct-ssl.sh /usr/local/bin/direct-ssl 2>/dev/null || true
   ln -sf /opt/website-engine/bin/maintenance.sh /usr/local/bin/maintenance 2>/dev/null || true
+  ln -sf /opt/website-engine/bin/fix-ssl-certificate.sh /usr/local/bin/fix-ssl 2>/dev/null || true
+  
+  # Mache die Skripte ausführbar
+  chmod +x /opt/website-engine/bin/*.sh 2>/dev/null || true
+  chmod +x /opt/website-engine-1.1/bin/*.sh 2>/dev/null || true
   
   print_success "Minimale Komponenten wurden installiert"
 }
@@ -128,6 +134,38 @@ EOF
   print_success "Setup-Server wurde sicher ausgeführt"
 }
 
+fix_ssl_certificates() {
+  print_section "ERSTELLE SSL-ZERTIFIKATE"
+  
+  # Bestimme die Domain aus der Konfiguration
+  source /opt/website-engine-1.1/modules/config.sh
+  
+  # Überprüfen, ob das SSL-Verzeichnis existiert
+  if [ ! -d "$SSL_DIR" ] || [ ! -f "$SSL_CERT_PATH" ]; then
+    print_warning "SSL-Zertifikate fehlen. Erstelle ein neues Wildcard-Zertifikat für $DOMAIN..."
+    
+    # Stelle sicher, dass die fix-ssl-certificate.sh ausführbar ist
+    chmod +x /opt/website-engine-1.1/bin/fix-ssl-certificate.sh
+    
+    # Führe das SSL-Fix-Skript aus
+    /opt/website-engine-1.1/bin/fix-ssl-certificate.sh
+    
+    if [ -f "$SSL_CERT_PATH" ]; then
+      print_success "SSL-Zertifikat wurde erfolgreich erstellt!"
+    else
+      print_error "Konnte kein SSL-Zertifikat erstellen. Dies kann mehrere Ursachen haben:"
+      echo "  - DNS-Konfiguration für $DOMAIN ist nicht korrekt"
+      echo "  - Der Server hat keinen öffentlichen Domainnamen"
+      echo "  - Certbot hat ein Problem mit der Validierung"
+      echo ""
+      echo "Alternative: Erstellen Sie das Zertifikat manuell mit einem DNS-Challenge:"
+      echo "  sudo certbot certonly --manual --preferred-challenges dns -d $DOMAIN -d *.$DOMAIN"
+    fi
+  else
+    print_success "SSL-Zertifikate sind bereits vorhanden in $SSL_DIR"
+  fi
+}
+
 # Hauptprogramm
 print_section "WEBSITE ENGINE SETUP FIX"
 echo -e "Dieses Skript behebt Probleme mit dem Server-Setup."
@@ -136,14 +174,24 @@ echo -e "Dieses Skript behebt Probleme mit dem Server-Setup."
 fix_setup_server_script
 install_minimal_required_components
 run_setup_server_safely
+fix_ssl_certificates
 
 print_section "SETUP FIX ABGESCHLOSSEN"
 echo -e "Das Setup wurde erfolgreich korrigiert und ausgeführt."
 echo -e "\n${BOLD}Nächste Schritte:${NC}"
 echo "1. Cloudflare-Anmeldedaten konfigurieren:"
 echo "   sudo nano /etc/profile.d/cloudflare.sh"
-echo "2. Eine WordPress-Seite erstellen:"
+echo "2. SSL-Zertifikate überprüfen:"
+echo "   sudo ls -la /etc/letsencrypt/live/"
+echo "3. Eine WordPress-Seite erstellen:"
 echo "   sudo create-site testsite123"
 echo ""
+echo "Wenn Probleme mit SSL-Zertifikaten auftreten:"
+echo "   sudo /opt/website-engine-1.1/bin/fix-ssl-certificate.sh"
+echo ""
 echo "Bei Problemen mit Apache starten Sie den Dienst neu:"
-echo "sudo systemctl restart apache2"
+echo "   sudo systemctl restart apache2"
+echo ""
+echo "Wenn die SSL-Zertifikate fehlen, aber die create-site Funktion funktionieren soll:"
+echo "   sudo create-site testsite123 --force-ssl"
+echo "   (Dies erstellt ein eigenes Zertifikat für diese Subdomain anstatt ein Wildcard-Zertifikat zu verwenden)"
