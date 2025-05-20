@@ -103,29 +103,51 @@ EOF
     
     # Dann erst die Webverzeichnisse bereinigen
     echo "Leere /var/www/* (außer /var/www/html)"
-    find /var/www -mindepth 1 -maxdepth 1 -type d ! -name "html" -exec rm -rf {} \;
+    find /var/www -mindepth 1 -maxdepth 1 -type d ! -name "html" -exec rm -rf {} \; 2>/dev/null || true
     
-    # MySQL-Datenbanken bereinigen (außer System-DBs)
+    # MySQL-Datenbanken bereinigen (außer System-DBs) - robustere Implementierung
     echo "Bereinige MySQL-Datenbanken..."
-    mysql -e "
-      SELECT CONCAT('DROP DATABASE IF EXISTS ', schema_name, ';')
-      FROM information_schema.schemata
-      WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')
-    " | grep -v "CONCAT" | while read -r drop_cmd; do
-      echo "  - Lösche Datenbank: ${drop_cmd}"
-      mysql -e "$drop_cmd" || true
-    done
+    # Speichere Befehle in temporärer Datei
+    {
+      mysql -e "SELECT CONCAT('DROP DATABASE IF EXISTS ', schema_name, ';') 
+                FROM information_schema.schemata 
+                WHERE schema_name NOT IN ('mysql', 'information_schema', 'performance_schema', 'sys')" 2>/dev/null || echo "# MySQL-Abfrage fehlgeschlagen"
+    } | grep -v "CONCAT" > /tmp/drop_db_commands.sql || true
     
-    # MySQL-Benutzer bereinigen
+    # Wenn die Datei existiert und nicht leer ist, führe die Befehle aus
+    if [ -s /tmp/drop_db_commands.sql ]; then
+      while IFS= read -r drop_cmd; do
+        # Überspringe Kommentarzeilen
+        [[ "$drop_cmd" =~ ^#.*$ ]] && continue
+        echo "  - Lösche Datenbank: ${drop_cmd}"
+        mysql -e "${drop_cmd}" 2>/dev/null || true
+      done < /tmp/drop_db_commands.sql
+    else
+      echo "  Keine benutzerdefinierten Datenbanken gefunden."
+    fi
+    rm -f /tmp/drop_db_commands.sql
+    
+    # MySQL-Benutzer bereinigen - robustere Implementierung
     echo "Bereinige MySQL-Benutzer..."
-    mysql -e "
-      SELECT CONCAT('DROP USER IF EXISTS ''', user, '''@''', host, ''';')
-      FROM mysql.user
-      WHERE user NOT IN ('root', 'mysql.sys', 'debian-sys-maint', 'mysql.infoschema', 'mysql.session')
-    " | grep -v "CONCAT" | while read -r drop_user; do
-      echo "  - Lösche Benutzer: ${drop_user}"
-      mysql -e "$drop_user" || true
-    done
+    # Speichere Befehle in temporärer Datei
+    {
+      mysql -e "SELECT CONCAT('DROP USER IF EXISTS ''', user, '''@''', host, ''';') 
+                FROM mysql.user 
+                WHERE user NOT IN ('root', 'mysql.sys', 'debian-sys-maint', 'mysql.infoschema', 'mysql.session')" 2>/dev/null || echo "# MySQL-Abfrage fehlgeschlagen"
+    } | grep -v "CONCAT" > /tmp/drop_user_commands.sql || true
+    
+    # Wenn die Datei existiert und nicht leer ist, führe die Befehle aus
+    if [ -s /tmp/drop_user_commands.sql ]; then
+      while IFS= read -r drop_user; do
+        # Überspringe Kommentarzeilen
+        [[ "$drop_user" =~ ^#.*$ ]] && continue
+        echo "  - Lösche Benutzer: ${drop_user}"
+        mysql -e "${drop_user}" 2>/dev/null || true
+      done < /tmp/drop_user_commands.sql
+    else
+      echo "  Keine benutzerdefinierten MySQL-Benutzer gefunden."
+    fi
+    rm -f /tmp/drop_user_commands.sql
     
     print_success "Vollständiger Reset abgeschlossen"
   fi
@@ -214,22 +236,28 @@ esac
 
 # 1. Install required packages
 print_section "Installiere benötigte Pakete"
-apt-get update
+apt-get update || { print_warning "apt-get update fehlgeschlagen, fahre trotzdem fort"; }
 apt-get install -y apache2 mysql-server php php-cli php-mysql php-curl php-xml \
-  php-mbstring php-zip php-gd php-intl libapache2-mod-php curl jq certbot python3-certbot-apache
+  php-mbstring php-zip php-gd php-intl libapache2-mod-php curl jq certbot python3-certbot-apache || {
+  print_warning "Einige Pakete konnten nicht installiert werden, überprüfe die Fehlermeldungen oben.";
+  print_warning "Die wichtigsten Pakete werden später noch einmal überprüft.";
+}
 
 # Install WP-CLI if not already installed
 if ! command -v wp >/dev/null 2>&1; then
   print_section "Installiere WP-CLI"
-  curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
-  chmod +x wp-cli.phar
-  mv wp-cli.phar /usr/local/bin/wp
-  print_success "WP-CLI installiert"
+  if curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar; then
+    chmod +x wp-cli.phar
+    mv wp-cli.phar /usr/local/bin/wp
+    print_success "WP-CLI installiert"
+  else
+    print_warning "WP-CLI konnte nicht heruntergeladen werden, überspringe."
+  fi
 fi
 
 # Install necessary tools for backups
 print_section "Installiere Backup-Tools"
-apt-get install -y restic
+apt-get install -y restic || print_warning "Restic konnte nicht installiert werden, fahre trotzdem fort."
 
 # 2. Enable Apache modules
 print_section "Aktiviere Apache-Module"
@@ -589,6 +617,77 @@ else
   else
     print_error "MySQL-Server konnte nicht gestartet werden. Dies muss manuell behoben werden."
   fi
+fi
+
+# Zusätzliche Überprüfung wichtiger Komponenten
+print_section "FINALE ÜBERPRÜFUNG"
+
+# Prüfen, ob alle kritischen Dienste laufen
+services_status=0
+
+echo "Überprüfe kritische Dienste..."
+if systemctl is-active --quiet apache2; then
+  print_success "Apache läuft"
+else
+  print_error "Apache läuft nicht. Versuche zu starten..."
+  systemctl start apache2 || true
+  if systemctl is-active --quiet apache2; then
+    print_success "Apache wurde erfolgreich gestartet"
+  else
+    print_error "Apache konnte nicht gestartet werden. Bitte prüfe das manuell."
+    services_status=1
+  fi
+fi
+
+if systemctl is-active --quiet mysql; then
+  print_success "MySQL läuft"
+else
+  print_error "MySQL läuft nicht. Versuche zu starten..."
+  systemctl start mysql || true
+  if systemctl is-active --quiet mysql; then
+    print_success "MySQL wurde erfolgreich gestartet"
+  else
+    print_error "MySQL konnte nicht gestartet werden. Bitte prüfe das manuell."
+    services_status=1
+  fi
+fi
+
+# Prüfen, ob die grundlegenden Verzeichnisse existieren
+directories_status=0
+echo "Überprüfe kritische Verzeichnisse..."
+for dir in /opt/website-engine /etc/website-engine /var/www /var/lib/website-engine; do
+  if [ -d "$dir" ]; then
+    print_success "Verzeichnis $dir existiert"
+  else
+    print_error "Verzeichnis $dir fehlt! Versuche zu erstellen..."
+    mkdir -p "$dir" && print_success "Verzeichnis $dir erstellt" || {
+      print_error "Konnte Verzeichnis $dir nicht erstellen";
+      directories_status=1;
+    }
+  fi
+done
+
+# Prüfen, ob die Symlinks für die Befehle existieren
+symlinks_status=0
+echo "Überprüfe Befehlssymlinks..."
+for cmd in create-site delete-site direct-ssl maintenance; do
+  if [ -L "/usr/local/bin/$cmd" ]; then
+    print_success "Befehl $cmd ist korrekt verlinkt"
+  else
+    print_error "Befehl $cmd ist nicht korrekt verlinkt! Versuche zu verlinken..."
+    ln -sf "/opt/website-engine/bin/${cmd}.sh" "/usr/local/bin/$cmd" && print_success "Befehl $cmd verlinkt" || {
+      print_error "Konnte Befehl $cmd nicht verlinken";
+      symlinks_status=1;
+    }
+  fi
+done
+
+# Gesamtstatus
+if [ $services_status -eq 0 ] && [ $directories_status -eq 0 ] && [ $symlinks_status -eq 0 ]; then
+  print_success "Alle kritischen Komponenten sind korrekt eingerichtet"
+else
+  print_warning "Einige Komponenten könnten Probleme haben. Überprüfen Sie die Warnungen oben."
+  print_warning "Sie können './bin/setup-fix.sh' ausführen, um häufige Probleme zu beheben."
 fi
 
 # 11. Instructions for the user
