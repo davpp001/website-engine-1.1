@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Error handling entfernt, um das Skript nicht bei Fehlern abzubrechen
+# Wir behandeln Fehler selbst innerhalb des Skripts
 
 # Color definitions
 RED='\033[0;31m'
@@ -32,35 +33,46 @@ function reset_server() {
   
   print_section "SERVERBEREINIGUNG (Level: $RESET_LEVEL)"
   
+  # Stoppt Apache, um Probleme bei der Bereinigung zu vermeiden
+  echo "Stoppe Apache-Webserver..."
+  systemctl stop apache2 || true
+  
   # Immer durchzuführende Aufgaben (Minimalreset)
   if [[ "$RESET_LEVEL" == "minimal" || "$RESET_LEVEL" == "standard" || "$RESET_LEVEL" == "full" ]]; then
     echo "Bereinige Apache-Konfigurationen..."
     
-    # Deaktiviere alle Sites
-    a2dissite '*' &>/dev/null || true
+    # Deaktiviere alle Sites außer der Default-Site
+    find /etc/apache2/sites-enabled/ -type l ! -name "000-default.conf" -delete || true
     
-    # Entferne -temp-le-ssl.conf-Dateien (diese werden manchmal von Let's Encrypt als temporäre Dateien erstellt)
-    find /etc/apache2/sites-available/ -name "*-temp-le-ssl.conf" -type f -print -delete
+    # Entferne alle VirtualHost-Konfigurationen außer der Default-Site
+    find /etc/apache2/sites-available/ -type f ! -name "000-default.conf" ! -name "default-ssl.conf" -delete || true
     
-    # Prüfe auf Apache-Konfigurationsdateien ohne entsprechende DocumentRoot-Verzeichnisse
-    echo "Prüfe auf Apache-Konfigurationen mit nicht existierenden DocumentRoot-Verzeichnissen..."
-    for conf_file in /etc/apache2/sites-available/*.conf; do
-      if [[ -f "$conf_file" ]]; then
-        local docroot=$(grep -oP 'DocumentRoot\s+\K[^\s]+' "$conf_file" | head -1)
-        if [[ -n "$docroot" && ! -d "$docroot" ]]; then
-          print_warning "Entferne Konfiguration mit nicht existierendem DocumentRoot: $conf_file (Verzeichnis: $docroot)"
-          rm -f "$conf_file"
-        fi
-      fi
-    done
+    # Entferne -temp-le-ssl.conf-Dateien
+    find /etc/apache2/sites-available/ -name "*-temp-le-ssl.conf" -type f -delete || true
     
-    # Reaktiviere default-Konfiguration
-    a2ensite 000-default &>/dev/null || true
+    # Sicherstellen, dass die Standard-Konfiguration existiert
+    if [ ! -f "/etc/apache2/sites-available/000-default.conf" ]; then
+      cat > /etc/apache2/sites-available/000-default.conf << EOF
+<VirtualHost *:80>
+    ServerAdmin webmaster@localhost
+    DocumentRoot /var/www/html
+    ErrorLog \${APACHE_LOG_DIR}/error.log
+    CustomLog \${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+EOF
+      print_success "Standard-Konfiguration (000-default.conf) erstellt"
+    fi
+    
+    # Aktiviere die Standard-Konfiguration
+    if [ ! -L "/etc/apache2/sites-enabled/000-default.conf" ]; then
+      a2ensite 000-default &>/dev/null || true
+      print_success "Standard-Site aktiviert"
+    fi
     
     print_success "Apache-Konfigurationen bereinigt"
   fi
   
-  # Standard-Reset (zusätzliche Aufgaben)
+  # Standard-Reset (zusätzliche Aufgaben) - Zertifikate löschen
   if [[ "$RESET_LEVEL" == "standard" || "$RESET_LEVEL" == "full" ]]; then
     echo "Führe Standard-Reset durch..."
     
@@ -85,7 +97,11 @@ function reset_server() {
   if [[ "$RESET_LEVEL" == "full" ]]; then
     echo "Führe vollständigen Reset durch..."
     
-    # Webverzeichnisse bereinigen
+    # Zuerst alle SSL-Zertifikate entfernen (vor dem Neustart von Apache)
+    echo "Entferne alle SSL-Zertifikate..."
+    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* || true
+    
+    # Dann erst die Webverzeichnisse bereinigen
     echo "Leere /var/www/* (außer /var/www/html)"
     find /var/www -mindepth 1 -maxdepth 1 -type d ! -name "html" -exec rm -rf {} \;
     
@@ -111,15 +127,36 @@ function reset_server() {
       mysql -e "$drop_user" || true
     done
     
-    # Alle SSL-Zertifikate entfernen
-    echo "Entferne alle SSL-Zertifikate..."
-    rm -rf /etc/letsencrypt/live/* /etc/letsencrypt/archive/* /etc/letsencrypt/renewal/* || true
-    
     print_success "Vollständiger Reset abgeschlossen"
   fi
   
+  # Apache-Konfiguration testen, bevor der Dienst neu gestartet wird
+  echo "Prüfe Apache-Konfiguration..."
+  if apache2ctl configtest &>/dev/null; then
+    print_success "Apache-Konfiguration ist gültig"
+  else
+    print_warning "Apache-Konfiguration enthält Fehler, korrigiere..."
+    # Versuche, Probleme automatisch zu beheben
+    find /etc/apache2/sites-enabled/ -type l ! -name "000-default.conf" -delete || true
+    
+    # Noch einmal prüfen
+    if apache2ctl configtest &>/dev/null; then
+      print_success "Apache-Konfiguration wurde korrigiert"
+    else
+      print_warning "Apache-Konfiguration enthält weiterhin Fehler"
+      # Wir versuchen trotzdem zu starten, da wir eine minimale Konfiguration haben
+    fi
+  fi
+  
   # Apache neustarten
-  systemctl restart apache2 || true
+  echo "Starte Apache neu..."
+  if systemctl start apache2; then
+    print_success "Apache erfolgreich gestartet"
+  else
+    print_error "Apache konnte nicht gestartet werden, überprüfe die Konfiguration manuell."
+    print_warning "Die Serverbereinigung wurde durchgeführt, aber Apache konnte nicht gestartet werden."
+    print_warning "Fahre trotzdem mit der Installation fort..."
+  fi
   
   print_success "Serverbereinigung abgeschlossen (Level: $RESET_LEVEL)"
 }
@@ -197,8 +234,21 @@ apt-get install -y restic
 # 2. Enable Apache modules
 print_section "Aktiviere Apache-Module"
 a2enmod rewrite ssl
-systemctl reload apache2
-print_success "Apache-Module aktiviert"
+
+# Versuche Apache neu zu laden oder zu starten
+echo "Lade Apache mit den neuen Modulen..."
+if systemctl is-active --quiet apache2; then
+  systemctl reload apache2 || systemctl restart apache2 || true
+else
+  systemctl start apache2 || true
+fi
+
+# Prüfe, ob Apache läuft
+if systemctl is-active --quiet apache2; then
+  print_success "Apache-Module aktiviert und Apache läuft"
+else
+  print_warning "Apache konnte nicht gestartet werden. Fahre trotzdem fort."
+fi
 
 # 3. Create directory structure
 print_section "Erstelle Verzeichnisstruktur"
@@ -478,11 +528,43 @@ for cmd in create-site delete-site setup-server; do
   fi
 done
 
+# Versuche Apache zu starten, falls es noch nicht läuft
+if ! systemctl is-active --quiet apache2; then
+  echo "Apache ist nicht aktiv. Versuche zu starten..."
+  
+  # Prüfe die Konfiguration erneut
+  if ! apache2ctl configtest &>/dev/null; then
+    print_warning "Apache-Konfiguration enthält Fehler. Verwende Standard-Konfiguration..."
+    
+    # Deaktiviere alle Sites außer der Default-Site
+    find /etc/apache2/sites-enabled/ -type l ! -name "000-default.conf" -delete || true
+    
+    # Sicherstelle, dass default aktiv ist
+    a2ensite 000-default &>/dev/null || true
+  fi
+  
+  # Starte Apache
+  systemctl start apache2 || true
+fi
+
 # Check Apache is running
 if systemctl is-active --quiet apache2; then
   print_success "Apache läuft"
 else
-  print_error "Apache läuft nicht"
+  print_error "Apache läuft nicht. Dies muss manuell behoben werden."
+  print_warning "Führe folgende Befehle aus, nachdem du die Installation abgeschlossen hast:"
+  echo "  sudo rm -f /etc/apache2/sites-enabled/*.conf"
+  echo "  sudo a2ensite 000-default"
+  echo "  sudo systemctl restart apache2"
+fi
+
+# Überprüfe SSL-Konfiguration
+if [ -d "/etc/letsencrypt/live" ]; then
+  echo "Prüfe SSL-Zertifikate..."
+  ls -la /etc/letsencrypt/live || true
+else
+  print_warning "Keine SSL-Zertifikate gefunden. Dies ist normal bei einer Erstinstallation."
+  echo "SSL-Zertifikate werden automatisch erstellt, wenn du neue Websites hinzufügst."
 fi
 
 # Check required directories
@@ -493,6 +575,21 @@ for dir in /opt/website-engine /etc/website-engine; do
     print_error "Verzeichnis $dir fehlt"
   fi
 done
+
+# Prüfe die MySQL-Installation
+echo "Prüfe MySQL-Server..."
+if systemctl is-active --quiet mysql; then
+  print_success "MySQL-Server läuft"
+else
+  print_error "MySQL-Server läuft nicht. Versuche zu starten..."
+  systemctl start mysql || true
+  
+  if systemctl is-active --quiet mysql; then
+    print_success "MySQL-Server erfolgreich gestartet"
+  else
+    print_error "MySQL-Server konnte nicht gestartet werden. Dies muss manuell behoben werden."
+  fi
+fi
 
 # 11. Instructions for the user
 print_section "SETUP ABGESCHLOSSEN"
