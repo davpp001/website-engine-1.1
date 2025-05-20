@@ -440,8 +440,7 @@ print_section "Konfiguriere Apache für Wildcard-SSL"
 cat <<EOF > /etc/apache2/sites-available/000-default-ssl.conf
 <VirtualHost *:443>
     ServerName $SERVER_DOMAIN
-    # Removed wildcard ServerAlias to avoid intercepting all subdomain requests
-    # Each subdomain should have its own VirtualHost configuration
+    ServerAlias *.$SERVER_DOMAIN
 
     DocumentRoot /var/www/html
 

@@ -356,15 +356,13 @@ function create_vhost_config() {
   # Prüfe, ob das Zertifikat existiert
   local USE_SSL=1
   if [[ ! -f "$CERT_PATH" || ! -f "$KEY_PATH" ]]; then
-    log "WARNING" "SSL-Zertifikatsdateien nicht gefunden. Verwende Fallback-Zertifikate."
-    # Verwende Fallback-Zertifikate statt komplett ohne SSL zu konfigurieren
-    CERT_PATH="$SSL_CERT_PATH"
-    KEY_PATH="$SSL_KEY_PATH"
+    log "WARNING" "SSL-Zertifikatsdateien nicht gefunden. Erstelle HTTP-only Konfiguration."
+    USE_SSL=0
   fi
 
-  # Immer eine vollständige Konfiguration mit HTTP und HTTPS erzeugen
-  # Entferne den 'if [[ $USE_SSL -eq 1 ]]; then' Block und immer beide Konfigurationen erstellen
-  sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+  if [[ $USE_SSL -eq 1 ]]; then
+    # Vollständige Konfiguration mit HTTP und HTTPS
+    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
 # Apache VirtualHost für ${FQDN}
 # Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -443,6 +441,49 @@ function create_vhost_config() {
   </Directory>
 </VirtualHost>
 VHOST_EOF
+  else
+    # Nur HTTP-Konfiguration
+    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+# Apache VirtualHost für ${FQDN} (HTTP-only)
+# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  # Verzeichniskonfiguration
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+  
+  # Sicherheitseinstellungen
+  <Directory ${DOCROOT}/wp-content/uploads>
+    # PHP-Ausführung in Uploads-Verzeichnis verbieten
+    <FilesMatch "\.(?i:php|phar|phtml|php\d+)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>
+</VirtualHost>
+VHOST_EOF
+  fi
   # Prüfe, ob die Konfiguration erfolgreich erstellt wurde
   if [[ ! -f "$VHOST_CONFIG" ]]; then
     log "ERROR" "Konnte vHost-Konfiguration nicht erstellen: $VHOST_CONFIG"
@@ -741,7 +782,7 @@ function fix_site_ssl() {
         return 1
       fi
     fi
-  fi
+  }
   
   # Jetzt die HTTPS-Konfiguration erstellen
   sudo tee "$HTTPS_CONF" > /dev/null << VHOST_SSL_EOF
