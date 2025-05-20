@@ -164,15 +164,6 @@ fix_ssl_certificates() {
   else
     print_success "SSL-Zertifikate sind bereits vorhanden in $SSL_DIR"
   fi
-  
-  # Repariere die Apache SSL-Konfiguration für bestehende WordPress-Seiten
-  if [ -f "/opt/website-engine-1.1/bin/fix-apache-ssl.sh" ]; then
-    print_warning "Repariere Apache SSL-Konfiguration für WordPress-Sites..."
-    chmod +x /opt/website-engine-1.1/bin/fix-apache-ssl.sh
-    /opt/website-engine-1.1/bin/fix-apache-ssl.sh
-  else
-    print_error "Apache SSL-Reparaturskript nicht gefunden: /opt/website-engine-1.1/bin/fix-apache-ssl.sh"
-  fi
 }
 
 # Hauptprogramm

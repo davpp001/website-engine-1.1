@@ -321,84 +321,18 @@ sudo apache2ctl -t > /dev/null 2>&1 || {
   exit 1
 }
 
-# Überprüfe explizit, ob die Site korrekt aktiviert wurde
-if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
-  echo "⚠️ Site wurde nicht aktiviert. Versuche es manuell..."
-  sudo a2ensite "${SUB}.conf" || {
-    echo "❌ Konnte vHost nicht aktivieren"
-    exit 1
-  }
-  # Überprüfe, ob der symbolische Link jetzt existiert
-  if [[ ! -e "/etc/apache2/sites-enabled/${SUB}.conf" ]]; then
-    echo "⚠️ a2ensite hat keinen Symlink erstellt, erstelle ihn manuell"
-    sudo ln -sf "/etc/apache2/sites-available/${SUB}.conf" "/etc/apache2/sites-enabled/${SUB}.conf" || {
-      echo "❌ Konnte Symlink nicht manuell erstellen"
-      exit 1
-    }
+# Überprüfe und aktiviere vHost
+log "INFO" "Aktiviere Apache vHost über modulare Funktion"
+enable_vhost "$SUB" || {
+  echo "❌ Fehler beim Aktivieren des vHost $SUB"
+  if [[ $TEST_MODE -eq 0 ]]; then
+    echo "🧹 Bereinige DNS-Einträge..."
+    delete_subdomain "$SUB"
   fi
-  echo "✅ Site wurde erfolgreich aktiviert"
-fi
+  exit 1
+}
 
-# Deaktiviere die Default-Site definitiv, wenn sie noch aktiv ist
-if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
-  echo "⚠️ Apache Default-Site ist aktiv und kann Konflikte verursachen. Wird deaktiviert..."
-  sudo a2dissite 000-default > /dev/null 2>&1
-  # Entferne den Symlink direkt, falls a2dissite nicht funktioniert hat
-  if [[ -e "/etc/apache2/sites-enabled/000-default.conf" ]]; then
-    sudo rm -f /etc/apache2/sites-enabled/000-default.conf
-  fi
-  echo "✅ Default-Site wurde deaktiviert"
-fi
-
-# Überprüfe, ob es konkurrierende VirtualHosts für *:80 gibt
-competing_sites=$(grep -l "VirtualHost \*:80" /etc/apache2/sites-enabled/* | grep -v "${SUB}.conf" || true)
-if [[ -n "$competing_sites" ]]; then
-  echo "⚠️ Warnung: Folgende Sites könnten mit Ihrer neuen Site konkurrieren:"
-  for site in $competing_sites; do
-    echo "   - $site"
-  done
-  echo "   Überprüfen Sie die ServerName-Direktiven in diesen Dateien."
-  
-  # Stelle sicher, dass alle VirtualHost-Konfigurationen DocumentRoot in HTTP und HTTPS haben
-  echo "🔧 Optimiere konkurrierende VirtualHost-Konfigurationen..."
-  for vhost_file in $competing_sites; do
-    site_base=$(basename "$vhost_file")
-    site_name="${site_base%.conf}"
-    
-    # Prüfe, ob DocumentRoot im HTTP-VirtualHost fehlt
-    if ! grep -q "DocumentRoot.*<VirtualHost \*:80>" "$vhost_file"; then
-      echo "   🔨 Füge DocumentRoot zu $site_name hinzu"
-      doc_root=$(grep -oP 'DocumentRoot\s+\K[^ ]+' "$vhost_file" | head -1)
-      if [[ -n "$doc_root" ]]; then
-        # Füge DocumentRoot zur HTTP-VirtualHost-Konfiguration hinzu
-        sudo sed -i '/<VirtualHost \*:80>/,/<\/VirtualHost>/ s|ServerSignature Off|ServerSignature Off\n\n  DocumentRoot '"$doc_root"'|' "$vhost_file"
-      fi
-    fi
-  done
-fi
-
-# Stelle sicher, dass Apache die Änderungen übernimmt
-sudo systemctl reload apache2
-
-# Zeige Apache-Status an (Debug)
-echo "📋 Apache-Konfigurationsstatus:"
-echo " - Verfügbare Sites: $(ls -la /etc/apache2/sites-available/${SUB}*.conf 2>/dev/null || echo 'Keine Konfiguration gefunden')"
-echo " - Aktivierte Sites: $(ls -la /etc/apache2/sites-enabled/${SUB}*.conf 2>/dev/null || echo 'Keine aktivierte Konfiguration gefunden')"
-
-# Apache neu laden
-echo "🔄 Apache-Dienst wird neu geladen..."
-sudo systemctl reload apache2
-sudo systemctl status apache2 --no-pager
-
-# Complete
-if [[ $SSL_OK -eq 1 ]]; then
-  FINAL_URL="https://$SUB.$DOMAIN"
-  SSL_STATUS="Aktiv"
-else
-  FINAL_URL="http://$SUB.$DOMAIN"
-  SSL_STATUS="Inaktiv - Bitte manuell einrichten"
-fi
-
+# Zeige abschließende Site-Informationen
 echo
 echo "✅ Neue WordPress-Seite erfolgreich erstellt!"
 echo "-------------------------------------------"

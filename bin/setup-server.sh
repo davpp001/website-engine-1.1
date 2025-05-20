@@ -65,6 +65,7 @@ EOF
     
     # Aktiviere die Standard-Konfiguration
     if [ ! -L "/etc/apache2/sites-enabled/000-default.conf" ]; then
+      cleanup_apache_configs ""  # Alle alten Sites löschen
       a2ensite 000-default &>/dev/null || true
       print_success "Standard-Site aktiviert"
     fi
