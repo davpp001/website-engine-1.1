@@ -356,13 +356,15 @@ function create_vhost_config() {
   # Prüfe, ob das Zertifikat existiert
   local USE_SSL=1
   if [[ ! -f "$CERT_PATH" || ! -f "$KEY_PATH" ]]; then
-    log "WARNING" "SSL-Zertifikatsdateien nicht gefunden. Erstelle HTTP-only Konfiguration."
-    USE_SSL=0
+    log "WARNING" "SSL-Zertifikatsdateien nicht gefunden. Verwende Fallback-Zertifikate."
+    # Verwende Fallback-Zertifikate statt komplett ohne SSL zu konfigurieren
+    CERT_PATH="$SSL_CERT_PATH"
+    KEY_PATH="$SSL_KEY_PATH"
   fi
 
-  if [[ $USE_SSL -eq 1 ]]; then
-    # Vollständige Konfiguration mit HTTP und HTTPS
-    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
+  # Immer eine vollständige Konfiguration mit HTTP und HTTPS erzeugen
+  # Entferne den 'if [[ $USE_SSL -eq 1 ]]; then' Block und immer beide Konfigurationen erstellen
+  sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
 # Apache VirtualHost für ${FQDN}
 # Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -441,49 +443,6 @@ function create_vhost_config() {
   </Directory>
 </VirtualHost>
 VHOST_EOF
-  else
-    # Nur HTTP-Konfiguration
-    sudo tee "$VHOST_CONFIG" > /dev/null << VHOST_EOF
-# Apache VirtualHost für ${FQDN} (HTTP-only)
-# Erstellt von Website Engine am $(date '+%Y-%m-%d %H:%M:%S')
-
-<VirtualHost *:80>
-  ServerName ${FQDN}
-  ServerAdmin ${WP_EMAIL}
-  ServerSignature Off
-  
-  DocumentRoot ${DOCROOT}
-  
-  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
-  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
-  
-  # Verzeichniskonfiguration
-  <Directory ${DOCROOT}>
-    Options FollowSymLinks
-    AllowOverride All
-    Require all granted
-    
-    # WordPress .htaccess nicht benötigen
-    <IfModule mod_rewrite.c>
-      RewriteEngine On
-      RewriteBase /
-      RewriteRule ^index\.php$ - [L]
-      RewriteCond %{REQUEST_FILENAME} !-f
-      RewriteCond %{REQUEST_FILENAME} !-d
-      RewriteRule . /index.php [L]
-    </IfModule>
-  </Directory>
-  
-  # Sicherheitseinstellungen
-  <Directory ${DOCROOT}/wp-content/uploads>
-    # PHP-Ausführung in Uploads-Verzeichnis verbieten
-    <FilesMatch "\.(?i:php|phar|phtml|php\d+)$">
-      Require all denied
-    </FilesMatch>
-  </Directory>
-</VirtualHost>
-VHOST_EOF
-  fi
   # Prüfe, ob die Konfiguration erfolgreich erstellt wurde
   if [[ ! -f "$VHOST_CONFIG" ]]; then
     log "ERROR" "Konnte vHost-Konfiguration nicht erstellen: $VHOST_CONFIG"
@@ -730,5 +689,213 @@ function remove_vhost() {
   }
   
   log "SUCCESS" "Apache vHost für $SUB erfolgreich entfernt"
+  return 0
+}
+
+# Funktion, um die SSL-Konfiguration einer bestehenden WordPress-Site zu reparieren
+# Usage: fix_site_ssl <subdomain-name>
+function fix_site_ssl() {
+  local SUB="$1"
+  local FQDN="${SUB}.${DOMAIN}"
+  local DOCROOT="${WP_DIR}/${SUB}"
+  local HTTP_CONF="/etc/apache2/sites-available/${SUB}.conf"
+  local HTTPS_CONF="/etc/apache2/sites-available/${SUB}-ssl.conf"
+  
+  log "INFO" "Repariere SSL-Konfiguration für $FQDN"
+  
+  # Prüfen, ob die Website-Konfiguration existiert
+  if [[ ! -f "$HTTP_CONF" ]]; then
+    log "ERROR" "Keine HTTP-Konfiguration für ${FQDN} gefunden: $HTTP_CONF"
+    return 1
+  fi
+  
+  # Prüfen, ob das WordPress-Verzeichnis existiert
+  if [[ ! -d "$DOCROOT" ]]; then
+    log "ERROR" "WordPress-Verzeichnis nicht gefunden: $DOCROOT"
+    return 1
+  fi
+  
+  # Bestimme die beste SSL-Zertifikats-Option
+  local CERT_PATH=""
+  local KEY_PATH=""
+  
+  # Nutze die Funktion, um die besten Zertifikatspfade zu ermitteln
+  if ! get_ssl_cert_paths "$FQDN" CERT_PATH KEY_PATH; then
+    log "WARNING" "Konnte keine passenden SSL-Zertifikate finden. Verwende Wildcard-Zertifikat falls vorhanden."
+    
+    # Prüfen, ob ein Wildcard-Zertifikat existiert
+    if [[ -f "$SSL_CERT_PATH" && -f "$SSL_KEY_PATH" ]]; then
+      CERT_PATH="$SSL_CERT_PATH"
+      KEY_PATH="$SSL_KEY_PATH"
+      log "INFO" "Verwende Wildcard-Zertifikat für $FQDN"
+    else
+      log "WARNING" "Kein SSL-Zertifikat gefunden, erstelle eigenes Zertifikat"
+      
+      # Versuche ein eigenes Zertifikat zu erstellen
+      if create_ssl_cert "$FQDN" "$DOCROOT"; then
+        log "SUCCESS" "SSL-Zertifikat für $FQDN erfolgreich erstellt"
+        CERT_PATH="/etc/letsencrypt/live/$FQDN/fullchain.pem"
+        KEY_PATH="/etc/letsencrypt/live/$FQDN/privkey.pem"
+      else
+        log "ERROR" "Konnte kein SSL-Zertifikat für $FQDN erstellen"
+        return 1
+      fi
+    fi
+  fi
+  
+  # Jetzt die HTTPS-Konfiguration erstellen
+  sudo tee "$HTTPS_CONF" > /dev/null << VHOST_SSL_EOF
+# HTTPS VirtualHost für ${FQDN}
+# Erstellt von Website Engine (SSL-Fix) am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:443>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_ssl_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_ssl_access.log combined
+  
+  # SSL-Konfiguration
+  SSLEngine on
+  SSLCertificateFile ${CERT_PATH}
+  SSLCertificateKeyFile ${KEY_PATH}
+  
+  # SSL-Sicherheitseinstellungen
+  SSLProtocol all -SSLv2 -SSLv3 -TLSv1 -TLSv1.1
+  SSLHonorCipherOrder on
+  SSLCompression off
+  
+  # Verzeichniskonfiguration
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    
+    # WordPress .htaccess nicht benötigen
+    <IfModule mod_rewrite.c>
+      RewriteEngine On
+      RewriteBase /
+      RewriteRule ^index\.php$ - [L]
+      RewriteCond %{REQUEST_FILENAME} !-f
+      RewriteCond %{REQUEST_FILENAME} !-d
+      RewriteRule . /index.php [L]
+    </IfModule>
+  </Directory>
+  
+  # Sicherheitseinstellungen
+  <Directory ${DOCROOT}/wp-content/uploads>
+    # PHP-Ausführung in Uploads-Verzeichnis verbieten
+    <FilesMatch "\.(?i:php|phar|phtml|php\d+)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>
+</VirtualHost>
+VHOST_SSL_EOF
+
+  # Aktualisiere die HTTP-Konfiguration für Redirect zu HTTPS
+  sudo tee "$HTTP_CONF" > /dev/null << VHOST_HTTP_EOF
+# Apache VirtualHost für ${FQDN} (HTTP -> HTTPS)
+# Aktualisiert von Website Engine (SSL-Fix) am $(date '+%Y-%m-%d %H:%M:%S')
+
+<VirtualHost *:80>
+  ServerName ${FQDN}
+  ServerAdmin ${WP_EMAIL}
+  ServerSignature Off
+  
+  DocumentRoot ${DOCROOT}
+  
+  ErrorLog \${APACHE_LOG_DIR}/${SUB}_error.log
+  CustomLog \${APACHE_LOG_DIR}/${SUB}_access.log combined
+  
+  # Redirect zu HTTPS
+  <IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{SERVER_NAME} =${FQDN}
+    RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [END,NE,R=permanent]
+  </IfModule>
+  
+  # Verzeichniskonfiguration (als Fallback)
+  <Directory ${DOCROOT}>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+  </Directory>
+</VirtualHost>
+VHOST_HTTP_EOF
+
+  # Aktiviere die neue HTTPS-Konfiguration
+  sudo a2ensite "${SUB}-ssl.conf" > /dev/null 2>&1
+  
+  # Überprüfe, ob der Symlink erstellt wurde
+  if [[ ! -e "/etc/apache2/sites-enabled/${SUB}-ssl.conf" ]]; then
+    log "WARNING" "a2ensite hat keinen Symlink erstellt, erstelle ihn manuell"
+    sudo ln -sf "$HTTPS_CONF" "/etc/apache2/sites-enabled/${SUB}-ssl.conf" || {
+      log "ERROR" "Konnte Symlink für HTTPS-Konfiguration nicht erstellen"
+      return 1
+    }
+  fi
+  
+  # Lade Apache neu
+  if ! sudo systemctl reload apache2 > /dev/null 2>&1; then
+    log "ERROR" "Apache Neustart fehlgeschlagen. Überprüfe die Syntax."
+    
+    # Überprüfe Apache-Syntax
+    local syntax_check=$(sudo apache2ctl -t 2>&1)
+    if [[ $? -ne 0 ]]; then
+      log "ERROR" "Apache-Syntaxfehler: $syntax_check"
+      return 1
+    }
+  }
+  
+  log "SUCCESS" "SSL-Konfiguration für $FQDN wurde repariert"
+  return 0
+}
+
+# Funktion zum Reparieren aller WordPress-Sites
+# Usage: fix_all_sites_ssl
+function fix_all_sites_ssl() {
+  log "INFO" "Repariere SSL für alle WordPress-Sites"
+  
+  # Suche alle WordPress-Sites in /var/www
+  local num_fixed=0
+  local num_failed=0
+  
+  # Überspringe html und andere Systemverzeichnisse
+  for site_dir in /var/www/*; do
+    # Überspringe Verzeichnisse, die nicht existieren oder keine WordPress-Sites sind
+    if [[ ! -d "$site_dir" || "$site_dir" = "/var/www/html" ]]; then
+      continue
+    fi
+    
+    # Ermittle den Subdomain-Namen aus dem Verzeichnisnamen
+    local sub_name=$(basename "$site_dir")
+    log "INFO" "Prüfe WordPress-Site: $sub_name"
+    
+    # Prüfe, ob es sich um eine WordPress-Installation handelt
+    if [[ -f "$site_dir/wp-config.php" ]]; then
+      # Prüfe, ob HTTPS bereits konfiguriert ist
+      if [[ -f "/etc/apache2/sites-available/${sub_name}-ssl.conf" ]]; then
+        log "INFO" "Site $sub_name hat bereits eine SSL-Konfiguration"
+      else
+        log "INFO" "Repariere SSL für $sub_name"
+        
+        # Repariere die SSL-Konfiguration für diese Site
+        if fix_site_ssl "$sub_name"; then
+          num_fixed=$((num_fixed + 1))
+          log "SUCCESS" "SSL für $sub_name wurde erfolgreich repariert"
+        else
+          num_failed=$((num_failed + 1))
+          log "ERROR" "Konnte SSL für $sub_name nicht reparieren"
+        fi
+      fi
+    else
+      log "INFO" "Verzeichnis $site_dir enthält keine WordPress-Installation"
+    fi
+  done
+  
+  log "INFO" "SSL-Reparatur abgeschlossen: $num_fixed Sites repariert, $num_failed Sites fehlgeschlagen"
   return 0
 }
